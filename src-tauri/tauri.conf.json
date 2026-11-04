@@ -13,11 +13,11 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "DMDebug Station | STM32 六轴达妙电机运动测控工作台",
+        "title": "DMDebug Station | 三总线设备工作台",
         "width": 1680,
         "height": 945,
-        "minWidth": 1160,
-        "minHeight": 650,
+        "minWidth": 1024,
+        "minHeight": 720,
         "resizable": true,
         "center": true
       }

@@ -1,644 +1,192 @@
-/**
- * @file protocol.ts
- * @brief STM32 六轴达妙电机串口二进制协议 (64字节定长帧, CRC-16/CCITT-FALSE)
- * @details 对应下位机 SERIAL_PROTOCOL.md 规范 (USART1 115200 8N1)
- */
-
-export const HEADER_0 = 0xa5;
-export const HEADER_1 = 0x5a;
-export const VERSION = 0x01;
+// Byte contract: DMDebug/SERIAL_PROTOCOL.md v2. Logical IDs are not raw CAN IDs.
+export const VERSION = 2;
 export const FRAME_SIZE = 64;
-export const TYPE_REQUEST = 0x00;
-export const TYPE_RESPONSE = 0x01;
-export const BROADCAST_MOTOR_ID = 0xff;
-
+export const BROADCAST = 0xff;
 export const Opcode = {
-  Heartbeat: 0x01,
-  Info: 0x02,
-  State: 0x10,
-  Parameters: 0x11,
-  Enable: 0x20,
-  Disable: 0x21,
-  Stop: 0x22,
-  SetZero: 0x23,
-  Move: 0x24,
-  SetLimits: 0x25,
+  Heartbeat: 0x01, Info: 0x02, State: 0x10, Parameters: 0x11, Wheels: 0x12,
+  Enable: 0x20, Disable: 0x21, Stop: 0x22, SetZero: 0x23, Move: 0x24,
+  SetLimits: 0x25, BodyVelocity: 0x26,
 } as const;
-
-export type OpcodeType = (typeof Opcode)[keyof typeof Opcode];
-
-export const OpcodeNames: Record<number, string> = {
-  0x01: 'Heartbeat (心跳)',
-  0x02: 'Info (系统信息)',
-  0x10: 'State (状态查询)',
-  0x11: 'Parameters (参数查询)',
-  0x20: 'Enable (电机使能)',
-  0x21: 'Disable (电机失能)',
-  0x22: 'Stop (轨迹停止)',
-  0x23: 'SetZero (软件归零)',
-  0x24: 'Move (位置运动)',
-  0x25: 'SetLimits (设置限位与动力学)',
-};
-
-export const ResultCode = {
-  Ok: 0,
-  Offline: 1,
-  NotZeroed: 2,
-  NotEnabled: 3,
-  Busy: 4,
-  InvalidParameters: 5,
-  OutsideLimits: 6,
-  NotStationary: 7,
-  MotorFault: 8,
-  PlanningFailed: 9,
-  InvalidCommand: 10,
-  TransmitFailed: 11,
-  BadVersion: 100,
-  BadType: 101,
-  BadLength: 102,
-  BadPadding: 103,
-  UnknownOpcode: 104,
-  UnknownMotor: 105,
-  SequenceConflict: 106,
-  LinkFault: 107,
-} as const;
-
-export type ResultCodeType = (typeof ResultCode)[keyof typeof ResultCode];
-
-export const ResultNames: Record<number, string> = {
-  0: 'Ok (受理/成功)',
-  1: 'Offline (电机未连接)',
-  2: 'NotZeroed (尚未建立软件零点)',
-  3: 'NotEnabled (未使能)',
-  4: 'Busy (运行忙/待处理命令中)',
-  5: 'InvalidParameters (限值或控制参数非法)',
-  6: 'OutsideLimits (超出工作限位或编码范围)',
-  7: 'NotStationary (未满足静止稳定条件)',
-  8: 'MotorFault (电机状态故障/使能确认超时)',
-  9: 'PlanningFailed (S曲线轨迹求解失败)',
-  10: 'InvalidCommand (设备层无效命令)',
-  11: 'TransmitFailed (CAN硬件发送失败)',
-  100: 'BadVersion (协议版本错误)',
-  101: 'BadType (请求类型错误)',
-  102: 'BadLength (Payload长度越界)',
-  103: 'BadPadding (保留位或填充非零)',
-  104: 'UnknownOpcode (未知Opcode)',
-  105: 'UnknownMotor (未知电机CAN ID)',
-  106: 'SequenceConflict (同序号请求内容冲突)',
-  107: 'LinkFault (串口超时锁存未握手)',
-};
-
-export const MotorStateNames: Record<number, string> = {
-  0: 'Disabled (已失能)',
-  1: 'Enabled (已使能)',
-  8: 'OverVoltage (过压)',
-  9: 'UnderVoltage (欠压)',
-  10: 'OverCurrent (过流)',
-  11: 'MosOverheating (驱动MOS过热)',
-  12: 'MotorCoilOverheating (电机线圈过热)',
-  13: 'Disconnected (失联)',
-  14: 'Overload (过载)',
-};
-
-export const OzoneCommandNames: Record<number, string> = {
-  0: '无待处理',
-  1: 'SetZero',
-  2: 'Enable',
-  3: 'Disable',
-  4: 'Move',
-  5: 'Stop',
-  6: 'ApplyLimits',
-};
-
-export interface MotorConfig {
-  index: number;
-  name: string;
-  model: string;
-  canId: number;
-  masterId: number;
-  initialMinDeg: number;
-  initialMaxDeg: number;
+export type DeviceKind = 'linear' | 'joint' | 'm2006' | 'chassis';
+export interface DeviceDefinition {
+  id: number; name: string; model: string; kind: DeviceKind; bus: 1 | 2 | 3;
+  unit: 'mm' | 'deg' | 'body'; wireKind: number; canLabel: string;
 }
-
-export const MOTORS: MotorConfig[] = [
-  { index: 0, name: '右前伸缩', model: 'DM-S3519', canId: 0x0a, masterId: 0x2a, initialMinDeg: -30, initialMaxDeg: 30 },
-  { index: 1, name: '中伸缩',   model: 'DM-S3519', canId: 0x0b, masterId: 0x2b, initialMinDeg: -30, initialMaxDeg: 30 },
-  { index: 2, name: '后伸缩',   model: 'DM-S3519', canId: 0x0c, masterId: 0x2c, initialMinDeg: -30, initialMaxDeg: 30 },
-  { index: 3, name: '左前旋转', model: 'DM-J4340P', canId: 0x0d, masterId: 0x2d, initialMinDeg: -180, initialMaxDeg: 180 },
-  { index: 4, name: '左前伸缩', model: 'DM-S3519', canId: 0x0e, masterId: 0x2e, initialMinDeg: -30, initialMaxDeg: 30 },
-  { index: 5, name: '右前旋转', model: 'DM-J4340P', canId: 0x0f, masterId: 0x2f, initialMinDeg: -180, initialMaxDeg: 180 },
+export const DEVICES: readonly DeviceDefinition[] = [
+  { id: 0x0a, name: '右前伸缩', model: 'DM-S3519', kind: 'linear', bus: 1, unit: 'mm', wireKind: 1, canLabel: 'CAN 0A → 2A' },
+  { id: 0x0b, name: '中伸缩', model: 'DM-S3519', kind: 'linear', bus: 1, unit: 'mm', wireKind: 1, canLabel: 'CAN 0B → 2B' },
+  { id: 0x0c, name: '后伸缩', model: 'DM-S3519', kind: 'linear', bus: 1, unit: 'mm', wireKind: 1, canLabel: 'CAN 0C → 2C' },
+  { id: 0x0d, name: '左前关节', model: 'DM-J4340P', kind: 'joint', bus: 1, unit: 'deg', wireKind: 2, canLabel: 'CAN 0D → 2D' },
+  { id: 0x0e, name: '左前伸缩', model: 'DM-S3519', kind: 'linear', bus: 1, unit: 'mm', wireKind: 1, canLabel: 'CAN 0E → 2E' },
+  { id: 0x0f, name: '右前关节', model: 'DM-J4340P', kind: 'joint', bus: 1, unit: 'deg', wireKind: 2, canLabel: 'CAN 0F → 2F' },
+  { id: 0x21, name: 'M2006 · 1', model: 'M2006 / C610', kind: 'm2006', bus: 3, unit: 'deg', wireKind: 3, canLabel: 'ID 1 → 201' },
+  { id: 0x22, name: 'M2006 · 2', model: 'M2006 / C610', kind: 'm2006', bus: 3, unit: 'deg', wireKind: 3, canLabel: 'ID 2 → 202' },
+  { id: 0x40, name: '全向轮底盘', model: '4 × DM-S3519', kind: 'chassis', bus: 2, unit: 'body', wireKind: 4, canLabel: '0B / 0A / 09 / 0C' },
 ];
+export const DEVICE_MAP = new Map(DEVICES.map(d => [d.id, d]));
+export const WHEEL_IDS = [0x41, 0x42, 0x43, 0x44] as const;
+export const WHEEL_NAMES = ['右前轮', '左前轮', '左后轮', '右后轮'] as const;
+export const RESULT_NAMES: Record<number, string> = {
+  0: '已受理', 1: '设备离线', 2: '尚未建立零点', 3: '未使能', 4: '设备忙 / 待确认',
+  5: '参数无效', 6: '超出工作或协议边界', 7: '尚未静止稳定', 8: '设备故障',
+  9: '轨迹规划失败', 10: '不支持的动作', 11: 'CAN 提交失败', 100: '协议版本不匹配',
+  101: '报文方向错误', 102: '负载长度错误', 103: '保留位或填充错误', 104: '未知命令',
+  105: '设备编号或命令不匹配', 106: '序号冲突', 107: '串口超时锁存',
+};
+export const OPCODE_NAMES: Record<number, string> = {
+  1: '心跳', 2: '设备发现', 0x10: '状态', 0x11: '参数', 0x12: '四轮反馈',
+  0x20: '使能', 0x21: '失能', 0x22: '停止 / 保持', 0x23: '设置软件零点',
+  0x24: '绝对位置目标', 0x25: '应用运动约束', 0x26: '车体系速度',
+};
+export const hexId = (id: number) => `0x${id.toString(16).toUpperCase().padStart(2, '0')}`;
+export const resultName = (result: number) => RESULT_NAMES[result] ?? `未知结果 ${result}`;
+export const bytesToHex = (data: Uint8Array) => Array.from(data, b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
 
-export const MOTOR_MAP = new Map<number, MotorConfig>(
-  MOTORS.map((m) => [m.canId, m])
-);
-
-// CRC-16/CCITT-FALSE (poly=0x1021, init=0xFFFF, refin=false, refout=false, xorout=0x0000)
 const CRC_TABLE = new Uint16Array(256);
 for (let i = 0; i < 256; i++) {
-  let curr = (i << 8) & 0xffff;
-  for (let j = 0; j < 8; j++) {
-    if ((curr & 0x8000) !== 0) {
-      curr = ((curr << 1) ^ 0x1021) & 0xffff;
-    } else {
-      curr = (curr << 1) & 0xffff;
-    }
-  }
-  CRC_TABLE[i] = curr;
+  let value = i << 8;
+  for (let bit = 0; bit < 8; bit++) value = ((value << 1) ^ ((value & 0x8000) ? 0x1021 : 0)) & 0xffff;
+  CRC_TABLE[i] = value;
 }
-
-export function calcCrc16(buffer: Uint8Array, length = buffer.length): number {
+export function calcCrc16(bytes: Uint8Array, length = bytes.length): number {
   let crc = 0xffff;
-  for (let i = 0; i < length; i++) {
-    crc = ((crc << 8) ^ CRC_TABLE[((crc >> 8) ^ buffer[i]) & 0xff]) & 0xffff;
-  }
+  for (let i = 0; i < length; i++) crc = ((crc << 8) ^ CRC_TABLE[((crc >> 8) ^ bytes[i]) & 255]) & 0xffff;
   return crc;
 }
-
-export function bytesToHex(arr: Uint8Array): string {
-  let hex = '';
-  for (let i = 0; i < arr.length; i++) {
-    hex += arr[i].toString(16).padStart(2, '0').toUpperCase() + ' ';
-  }
-  return hex.trim();
-}
-
-/**
- * 构造固定 64 字节请求帧 (Little-Endian)
- */
-export function encodeFrame(
-  sequence: number,
-  opcode: number,
-  motor: number,
-  payload: Uint8Array = new Uint8Array(0)
-): Uint8Array {
-  if (sequence < 0 || sequence > 0xffff) {
-    throw new Error(`Invalid sequence: ${sequence}`);
-  }
-  if (payload.length > 50) {
-    throw new Error(`Payload length ${payload.length} exceeds max 50 bytes`);
-  }
-
-  const frame = new Uint8Array(FRAME_SIZE);
-  const view = new DataView(frame.buffer);
-
-  frame[0] = HEADER_0;
-  frame[1] = HEADER_1;
-  frame[2] = VERSION;
-  frame[3] = TYPE_REQUEST;
-  view.setUint16(4, sequence & 0xffff, true);
-  frame[6] = opcode & 0xff;
-  frame[7] = motor & 0xff;
-  view.setUint16(8, payload.length, true);
-  view.setUint16(10, 0, true); // reserved must be 0
-
-  if (payload.length > 0) {
-    frame.set(payload, 12);
-  }
-
-  // 计算 CRC-16 (覆盖 0..61 字节)
-  const crc = calcCrc16(frame, 62);
-  view.setUint16(62, crc, true);
-
+export function encodeRequest(sequence: number, opcode: number, id: number, values: readonly number[] = []): Uint8Array {
+  if (!Number.isInteger(sequence) || sequence < 0 || sequence > 65535) throw new Error('请求序号无效');
+  if (!Number.isInteger(opcode) || opcode < 0 || opcode > 255 || !Number.isInteger(id) || id < 0 || id > 255) throw new Error('报文编号无效');
+  if (values.length > 12 || values.some(v => !Number.isFinite(v))) throw new Error('请求必须包含有限数值');
+  const frame = new Uint8Array(64), view = new DataView(frame.buffer);
+  frame.set([0xa5, 0x5a, VERSION, 0]); view.setUint16(4, sequence, true); frame[6] = opcode; frame[7] = id;
+  view.setUint16(8, values.length * 4, true);
+  values.forEach((v, i) => { view.setFloat32(12 + 4 * i, v, true); if (!Number.isFinite(view.getFloat32(12 + 4 * i, true))) throw new Error('数值超出 float32 范围'); });
+  view.setUint16(62, calcCrc16(frame, 62), true);
   return frame;
 }
-
-export function encodeHeartbeat(seq: number): Uint8Array {
-  return encodeFrame(seq, Opcode.Heartbeat, BROADCAST_MOTOR_ID);
+export function expectedResponseIds(opcode: number, id: number): number[] {
+  if (id === BROADCAST && (opcode === Opcode.State || opcode === Opcode.Disable || opcode === Opcode.Stop)) return DEVICES.map(d => d.id);
+  if (opcode === Opcode.Wheels && id === 0x40) return [...WHEEL_IDS];
+  return [id];
 }
-
-export function encodeInfo(seq: number): Uint8Array {
-  return encodeFrame(seq, Opcode.Info, BROADCAST_MOTOR_ID);
+export interface Flags {
+  connected: boolean; zeroed: boolean; limitsConfigured: boolean; enabled: boolean;
+  enablePending: boolean; busy: boolean; motionComplete: boolean; fault: boolean; hostLinkTimeout: boolean;
 }
-
-export function encodeState(seq: number, motor: number = BROADCAST_MOTOR_ID): Uint8Array {
-  return encodeFrame(seq, Opcode.State, motor);
+export function decodeFlags(bits: number): Flags {
+  return { connected: !!(bits & 1), zeroed: !!(bits & 2), limitsConfigured: !!(bits & 4), enabled: !!(bits & 8),
+    enablePending: !!(bits & 16), busy: !!(bits & 32), motionComplete: !!(bits & 64), fault: !!(bits & 128), hostLinkTimeout: !!(bits & 256) };
 }
-
-export function encodeParameters(seq: number, motor: number): Uint8Array {
-  return encodeFrame(seq, Opcode.Parameters, motor);
+export interface BaseResponse { sequence: number; opcode: number; id: number; result: number; raw: Uint8Array }
+export interface Ack extends BaseResponse { type: 'ack' }
+export interface Heartbeat extends BaseResponse { type: 'heartbeat'; uptimeMs: number; linkTimeout: boolean }
+export interface Info extends BaseResponse {
+  type: 'info'; uptimeMs: number; linkTimeout: boolean; timeoutMs: number; deviceIds: number[]; kinds: number[];
+  trajectoryHz: number; positionHz: number; velocityHz: number; chassisHz: number; baudRate: number;
 }
-
-export function encodeEnable(seq: number, motor: number): Uint8Array {
-  return encodeFrame(seq, Opcode.Enable, motor);
+export interface MotorState extends BaseResponse {
+  type: 'motor-state'; kind: 'linear' | 'joint' | 'm2006'; unit: 'mm' | 'deg'; bus: number; flags: Flags;
+  lastResult: number; motorState: number | null; feedbackCount: number;
+  position: number; velocity: number; target: number; reference: number | null; referenceVelocity: number | null;
+  torque: number | null; torqueFeedforward: number | null; pendingCommand: number | null;
 }
-
-export function encodeDisable(seq: number, motor: number = BROADCAST_MOTOR_ID): Uint8Array {
-  return encodeFrame(seq, Opcode.Disable, motor);
+export interface BodyVelocity { vx: number; vy: number; wz: number }
+export interface ChassisState extends BaseResponse {
+  type: 'chassis-state'; kind: 'chassis'; flags: Flags; lastResult: number;
+  velocity: BodyVelocity; target: BodyVelocity; onlineMask: number; enabledMask: number; faultMask: number;
 }
-
-export function encodeStop(seq: number, motor: number = BROADCAST_MOTOR_ID): Uint8Array {
-  return encodeFrame(seq, Opcode.Stop, motor);
+export interface WheelState extends BaseResponse {
+  type: 'wheel-state'; connected: boolean; canId: number; masterId: number; motorState: number;
+  position: number; velocityRpm: number; torque: number;
 }
-
-export function encodeSetZero(seq: number, motor: number): Uint8Array {
-  return encodeFrame(seq, Opcode.SetZero, motor);
+export interface DmParameters extends BaseResponse {
+  type: 'dm-parameters'; configured: boolean; bounded: boolean; kind: 'linear' | 'joint'; unit: 'mm' | 'deg';
+  min: number | null; max: number | null; maxVelocity: number; maxAcceleration: number; maxJerk: number;
+  kp: number; kd: number; torqueFeedforward: number; finish: number; stationaryRpm: number;
 }
-
-export function encodeMove(seq: number, motor: number, targetDeg: number): Uint8Array {
-  const payload = new Uint8Array(4);
-  new DataView(payload.buffer).setFloat32(0, targetDeg, true);
-  return encodeFrame(seq, Opcode.Move, motor, payload);
+export interface DjiParameters extends BaseResponse {
+  type: 'dji-parameters'; velocityPid: { kp: number; ki: number; kd: number; outputMax: number };
+  positionPd: { kp: number; kd: number; outputMax: number };
+  profile: { maxVelocity: number; maxAcceleration: number; maxJerk: number }; finish: number; stationaryRpm: number;
 }
-
-export interface LimitsConfig {
-  minDeg: number;
-  maxDeg: number;
-  maxVelocityDegS: number;
-  maxAccelerationDegS2: number;
-  maxJerkDegS3: number;
+export interface ChassisParameters extends BaseResponse {
+  type: 'chassis-parameters'; maxVx: number; maxVy: number; maxWz: number; maxWheelRpm: number;
+  radiusMm: number; distanceXmm: number; distanceYmm: number;
 }
+export type DeviceState = MotorState | ChassisState;
+export type DeviceParameters = DmParameters | DjiParameters | ChassisParameters;
+export type Response = Ack | Heartbeat | Info | DeviceState | WheelState | DeviceParameters;
+export interface ProtocolIssue { kind: 'crc' | 'version' | 'structure'; message: string }
 
-export function encodeSetLimits(seq: number, motor: number, limits: LimitsConfig): Uint8Array {
-  const payload = new Uint8Array(20);
-  const view = new DataView(payload.buffer);
-  view.setFloat32(0, limits.minDeg, true);
-  view.setFloat32(4, limits.maxDeg, true);
-  view.setFloat32(8, limits.maxVelocityDegS, true);
-  view.setFloat32(12, limits.maxAccelerationDegS2, true);
-  view.setFloat32(16, limits.maxJerkDegS3, true);
-  return encodeFrame(seq, Opcode.SetLimits, motor, payload);
-}
-
-// ================= 解码数据结构 =================
-
-export interface BaseDecodedFrame {
-  sequence: number;
-  opcode: number;
-  motor: number;
-  payloadLength: number;
-  result: number;
-  raw: Uint8Array;
-}
-
-export interface HeartbeatPayload extends BaseDecodedFrame {
-  opcode: typeof Opcode.Heartbeat;
-  linkFlags: {
-    seenValidRequest: boolean;
-    hostLinkTimeout: boolean;
-    raw: number;
-  };
-  uptimeMs: number;
-}
-
-export interface InfoPayload extends BaseDecodedFrame {
-  opcode: typeof Opcode.Info;
-  linkFlags: {
-    seenValidRequest: boolean;
-    hostLinkTimeout: boolean;
-    raw: number;
-  };
-  uptimeMs: number;
-  hostTimeoutMs: number;
-  trajectoryHz: number;
-  nominalPerMotorTxHz: number;
-  groupedTxTickHz: number;
-  feedbackCheckHz: number;
-  motorCount: number;
-  canFormat: number;
-  canIds: number[];
-  masterIds: number[];
-}
-
-export interface StatePayload extends BaseDecodedFrame {
-  opcode: typeof Opcode.State;
-  flags: {
-    connected: boolean;
-    zeroed: boolean;
-    limitsConfigured: boolean;
-    enabled: boolean;
-    enablePending: boolean;
-    busy: boolean;
-    motionComplete: boolean;
-    fault: boolean;
-    hostLinkTimeout: boolean;
-    raw: number;
-  };
-  motorState: number;
-  feedbackCount: number;
-  positionDeg: number;
-  velocityRpm: number;
-  torqueNm: number;
-  acceptedTargetDeg: number;
-  referenceDeg: number;
-  referenceVelocityDegS: number;
-  commandedTorqueFfNm: number;
-  lastDeviceResult: number;
-  pendingOzoneCommand: number;
-}
-
-export interface ParametersPayload extends BaseDecodedFrame {
-  opcode: typeof Opcode.Parameters;
-  flags: {
-    limitsConfigured: boolean;
-    raw: number;
-  };
-  minDeg: number;
-  maxDeg: number;
-  maxVelocityDegS: number;
-  maxAccelerationDegS2: number;
-  maxJerkDegS3: number;
-  kp: number;
-  kd: number;
-  torqueFfNm: number;
-  finishDeg: number;
-  stationaryRpm: number;
-}
-
-export interface ActionPayload extends BaseDecodedFrame {
-  opcode:
-    | typeof Opcode.Enable
-    | typeof Opcode.Disable
-    | typeof Opcode.Stop
-    | typeof Opcode.SetZero
-    | typeof Opcode.Move
-    | typeof Opcode.SetLimits;
-}
-
-export type DecodedResponse =
-  | HeartbeatPayload
-  | InfoPayload
-  | StatePayload
-  | ParametersPayload
-  | ActionPayload
-  | BaseDecodedFrame;
-
-/**
- * 解析单帧 64 字节应答报文
- */
-export function decodeFrame(frame: Uint8Array): DecodedResponse | null {
-  if (frame.length !== FRAME_SIZE) return null;
-  if (frame[0] !== HEADER_0 || frame[1] !== HEADER_1) return null;
-
+export function decodeFrame(frame: Uint8Array): Response {
+  if (frame.length !== 64 || frame[0] !== 0xa5 || frame[1] !== 0x5a) throw new Error('不是完整的64字节帧');
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
-  const version = frame[2];
-  const type = frame[3];
-  const sequence = view.getUint16(4, true);
-  const opcode = frame[6];
-  const motor = frame[7];
-  const payloadLength = view.getUint16(8, true);
-  const reserved = view.getUint16(10, true);
-  const receivedCrc = view.getUint16(62, true);
-
-  // 1. 验证 CRC
-  const calculatedCrc = calcCrc16(frame, 62);
-  if (receivedCrc !== calculatedCrc) {
-    return null;
+  if (view.getUint16(62, true) !== calcCrc16(frame, 62)) throw new Error('CRC校验失败');
+  if (frame[2] !== VERSION) throw new Error(`固件报文版本 ${frame[2]}，本程序要求 v2`);
+  const length = view.getUint16(8, true);
+  if (frame[3] !== 1 || length < 2 || length > 50 || view.getUint16(10, true) !== 0 || frame.subarray(12 + length, 62).some(v => v !== 0)) throw new Error('应答方向、长度或填充无效');
+  const base: BaseResponse = { sequence: view.getUint16(4, true), opcode: frame[6], id: frame[7], result: view.getUint16(12, true), raw: frame.slice() };
+  if (base.result !== 0) { if (length !== 2) throw new Error('错误应答长度必须为2'); return { ...base, type: 'ack' }; }
+  const u16 = (p: number) => view.getUint16(12 + p, true);
+  const f32 = (p: number) => { const value = view.getFloat32(12 + p, true); if (!Number.isFinite(value)) throw new Error(`P${p}不是有限数值`); return value; };
+  const exact = (n: number) => { if (length !== n) throw new Error(`应答长度${length}，要求${n}`); };
+  const definition = DEVICE_MAP.get(base.id);
+  const flags = () => decodeFlags(u16(2));
+  if (base.opcode === Opcode.Heartbeat) { exact(8); if (base.id !== 255) throw new Error('心跳设备编号错误'); return { ...base, type: 'heartbeat', uptimeMs: view.getUint32(16, true), linkTimeout: !!(u16(2) & 2) }; }
+  if (base.opcode === Opcode.Info) {
+    exact(42); if (base.id !== 255 || frame[22] !== 9 || frame[23] !== 2) throw new Error('固件设备清单或协议版本不兼容');
+    const deviceIds = Array.from(frame.subarray(24, 33)), kinds = Array.from(frame.subarray(33, 42));
+    if (deviceIds.some((id, i) => id !== DEVICES[i].id || kinds[i] !== DEVICES[i].wireKind)) throw new Error('固件设备映射与v2规范不匹配');
+    return { ...base, type: 'info', uptimeMs: view.getUint32(16, true), linkTimeout: !!(u16(2) & 2), timeoutMs: u16(8), deviceIds, kinds,
+      trajectoryHz: u16(30), positionHz: u16(32), velocityHz: u16(34), chassisHz: u16(36), baudRate: view.getUint32(50, true) };
   }
-
-  // 2. 验证协议结构
-  if (version !== VERSION || type !== TYPE_RESPONSE) return null;
-  if (payloadLength < 2 || payloadLength > 50) return null;
-  if (reserved !== 0) return null;
-
-  // 3. 验证未使用的尾部全部为零
-  for (let i = 12 + payloadLength; i < 62; i++) {
-    if (frame[i] !== 0) return null;
+  if (base.opcode === Opcode.Wheels) {
+    exact(20); if (!(WHEEL_IDS as readonly number[]).includes(base.id)) throw new Error('四轮反馈编号错误');
+    return { ...base, type: 'wheel-state', connected: !!(u16(2) & 1), canId: frame[16], masterId: frame[17], motorState: u16(6), position: f32(8), velocityRpm: f32(12), torque: f32(16) };
   }
-
-  // 4. 解析结果码
-  const result = view.getUint16(12, true);
-  const base: BaseDecodedFrame = {
-    sequence,
-    opcode,
-    motor,
-    payloadLength,
-    result,
-    raw: frame,
-  };
-
-  // 如果下位机返回错误码，payload 长度为 2
-  if (result !== ResultCode.Ok || payloadLength === 2) {
-    return base;
+  if (!definition) throw new Error(`未知逻辑设备${hexId(base.id)}`);
+  if (base.opcode === Opcode.State) {
+    if (frame[16] !== definition.wireKind || frame[17] !== (definition.unit === 'mm' ? 2 : definition.unit === 'deg' ? 1 : 3) || frame[18] !== definition.bus || frame[19] !== 0) throw new Error('状态类型、单位或总线不匹配');
+    if (definition.kind === 'chassis') {
+      exact(44); return { ...base, type: 'chassis-state', kind: 'chassis', flags: flags(), lastResult: u16(8),
+        velocity: { vx: f32(16), vy: f32(20), wz: f32(24) }, target: { vx: f32(28), vy: f32(32), wz: f32(36) }, onlineMask: frame[52], enabledMask: frame[53], faultMask: frame[54] };
+    }
+    exact(definition.kind === 'm2006' ? 32 : 48);
+    return { ...base, type: 'motor-state', kind: definition.kind, unit: definition.unit as 'mm' | 'deg', bus: definition.bus, flags: flags(), lastResult: u16(8),
+      motorState: definition.kind === 'm2006' ? null : u16(10), feedbackCount: view.getUint32(24, true), position: f32(16), velocity: f32(20), target: f32(24),
+      reference: definition.kind === 'm2006' ? null : f32(28), referenceVelocity: definition.kind === 'm2006' ? f32(28) * 6 : f32(32),
+      torque: definition.kind === 'm2006' ? null : f32(36), torqueFeedforward: definition.kind === 'm2006' ? null : f32(40), pendingCommand: definition.kind === 'm2006' ? null : u16(44) };
   }
-
-  // 5. 根据 Opcode 解码详细负载
-  const pOffset = 12;
-
-  switch (opcode) {
-    case Opcode.Heartbeat: {
-      if (payloadLength < 8) return base;
-      const rawFlags = view.getUint16(pOffset + 2, true);
-      const uptimeMs = view.getUint32(pOffset + 4, true);
-      const hb: HeartbeatPayload = {
-        ...base,
-        opcode: Opcode.Heartbeat,
-        linkFlags: {
-          seenValidRequest: (rawFlags & 0x01) !== 0,
-          hostLinkTimeout: (rawFlags & 0x02) !== 0,
-          raw: rawFlags,
-        },
-        uptimeMs,
-      };
-      return hb;
+  if (base.opcode === Opcode.Parameters) {
+    if (definition.kind === 'm2006') {
+      exact(50); return { ...base, type: 'dji-parameters', velocityPid: { kp: f32(2), ki: f32(6), kd: f32(10), outputMax: f32(14) },
+        positionPd: { kp: f32(18), kd: f32(22), outputMax: f32(26) }, profile: { maxVelocity: f32(30), maxAcceleration: f32(34), maxJerk: f32(38) }, finish: f32(42), stationaryRpm: f32(46) };
     }
-
-    case Opcode.Info: {
-      if (payloadLength < 32) return base;
-      const rawFlags = view.getUint16(pOffset + 2, true);
-      const uptimeMs = view.getUint32(pOffset + 4, true);
-      const hostTimeoutMs = view.getUint16(pOffset + 8, true);
-      const trajectoryHz = view.getUint16(pOffset + 10, true);
-      const nominalPerMotorTxHz = view.getUint16(pOffset + 12, true);
-      const groupedTxTickHz = view.getUint16(pOffset + 14, true);
-      const feedbackCheckHz = view.getUint16(pOffset + 16, true);
-      const motorCount = frame[pOffset + 18];
-      const canFormat = frame[pOffset + 19];
-      const canIds: number[] = [];
-      for (let i = 0; i < 6; i++) canIds.push(frame[pOffset + 20 + i]);
-      const masterIds: number[] = [];
-      for (let i = 0; i < 6; i++) masterIds.push(frame[pOffset + 26 + i]);
-
-      const info: InfoPayload = {
-        ...base,
-        opcode: Opcode.Info,
-        linkFlags: {
-          seenValidRequest: (rawFlags & 0x01) !== 0,
-          hostLinkTimeout: (rawFlags & 0x02) !== 0,
-          raw: rawFlags,
-        },
-        uptimeMs,
-        hostTimeoutMs,
-        trajectoryHz,
-        nominalPerMotorTxHz,
-        groupedTxTickHz,
-        feedbackCheckHz,
-        motorCount,
-        canFormat,
-        canIds,
-        masterIds,
-      };
-      return info;
-    }
-
-    case Opcode.State: {
-      if (payloadLength < 44) return base;
-      const rawFlags = view.getUint16(pOffset + 2, true);
-      const motorState = view.getUint32(pOffset + 4, true);
-      const feedbackCount = view.getUint32(pOffset + 8, true);
-      const positionDeg = view.getFloat32(pOffset + 12, true);
-      const velocityRpm = view.getFloat32(pOffset + 16, true);
-      const torqueNm = view.getFloat32(pOffset + 20, true);
-      const acceptedTargetDeg = view.getFloat32(pOffset + 24, true);
-      const referenceDeg = view.getFloat32(pOffset + 28, true);
-      const referenceVelocityDegS = view.getFloat32(pOffset + 32, true);
-      const commandedTorqueFfNm = view.getFloat32(pOffset + 36, true);
-      const lastDeviceResult = view.getUint16(pOffset + 40, true);
-      const pendingOzoneCommand = view.getUint16(pOffset + 42, true);
-
-      const st: StatePayload = {
-        ...base,
-        opcode: Opcode.State,
-        flags: {
-          connected: (rawFlags & (1 << 0)) !== 0,
-          zeroed: (rawFlags & (1 << 1)) !== 0,
-          limitsConfigured: (rawFlags & (1 << 2)) !== 0,
-          enabled: (rawFlags & (1 << 3)) !== 0,
-          enablePending: (rawFlags & (1 << 4)) !== 0,
-          busy: (rawFlags & (1 << 5)) !== 0,
-          motionComplete: (rawFlags & (1 << 6)) !== 0,
-          fault: (rawFlags & (1 << 7)) !== 0,
-          hostLinkTimeout: (rawFlags & (1 << 8)) !== 0,
-          raw: rawFlags,
-        },
-        motorState,
-        feedbackCount,
-        positionDeg,
-        velocityRpm,
-        torqueNm,
-        acceptedTargetDeg,
-        referenceDeg,
-        referenceVelocityDegS,
-        commandedTorqueFfNm,
-        lastDeviceResult,
-        pendingOzoneCommand,
-      };
-      return st;
-    }
-
-    case Opcode.Parameters: {
-      if (payloadLength < 44) return base;
-      const rawFlags = view.getUint16(pOffset + 2, true);
-      const minDeg = view.getFloat32(pOffset + 4, true);
-      const maxDeg = view.getFloat32(pOffset + 8, true);
-      const maxVelocityDegS = view.getFloat32(pOffset + 12, true);
-      const maxAccelerationDegS2 = view.getFloat32(pOffset + 16, true);
-      const maxJerkDegS3 = view.getFloat32(pOffset + 20, true);
-      const kp = view.getFloat32(pOffset + 24, true);
-      const kd = view.getFloat32(pOffset + 28, true);
-      const torqueFfNm = view.getFloat32(pOffset + 32, true);
-      const finishDeg = view.getFloat32(pOffset + 36, true);
-      const stationaryRpm = view.getFloat32(pOffset + 40, true);
-
-      const params: ParametersPayload = {
-        ...base,
-        opcode: Opcode.Parameters,
-        flags: {
-          limitsConfigured: (rawFlags & 0x01) !== 0,
-          raw: rawFlags,
-        },
-        minDeg,
-        maxDeg,
-        maxVelocityDegS,
-        maxAccelerationDegS2,
-        maxJerkDegS3,
-        kp,
-        kd,
-        torqueFfNm,
-        finishDeg,
-        stationaryRpm,
-      };
-      return params;
-    }
-
-    default:
-      return base;
+    if (definition.kind === 'chassis') { exact(30); return { ...base, type: 'chassis-parameters', maxVx: f32(2), maxVy: f32(6), maxWz: f32(10), maxWheelRpm: f32(14), radiusMm: f32(18), distanceXmm: f32(22), distanceYmm: f32(26) }; }
+    exact(48); if (frame[16] !== definition.wireKind || frame[17] !== (definition.kind === 'linear' ? 2 : 1) || frame[18] !== 1) throw new Error('DM参数类型或单位错误');
+    if (definition.kind === 'linear' && (!Number.isNaN(view.getFloat32(20, true)) || !Number.isNaN(view.getFloat32(24, true)))) throw new Error('伸缩行程区间应标记为未配置');
+    return { ...base, type: 'dm-parameters', kind: definition.kind, unit: definition.unit as 'mm' | 'deg', configured: !!(u16(2) & 1), bounded: !!(u16(2) & 2),
+      min: definition.kind === 'linear' ? null : f32(8), max: definition.kind === 'linear' ? null : f32(12), maxVelocity: f32(16), maxAcceleration: f32(20), maxJerk: f32(24),
+      kp: f32(28), kd: f32(32), torqueFeedforward: f32(36), finish: f32(40), stationaryRpm: f32(44) };
   }
+  exact(2); return { ...base, type: 'ack' };
 }
-
-/**
- * 流式解包器 (StreamUnpacker)
- * 严格按照 SERIAL_PROTOCOL.md：
- * 累积字节 -> 寻找 A5 5A -> 凑齐 64B 校验 CRC -> CRC 错误丢一字节继续同步
- */
 export class StreamUnpacker {
-  private buffer: Uint8Array = new Uint8Array(4096);
-  private size: number = 0;
-
-  public feed(chunk: Uint8Array): DecodedResponse[] {
-    // 确保缓冲区容量
-    if (this.size + chunk.length > this.buffer.length) {
-      const newCapacity = Math.max(this.buffer.length * 2, this.size + chunk.length + 1024);
-      const nextBuf = new Uint8Array(newCapacity);
-      nextBuf.set(this.buffer.subarray(0, this.size), 0);
-      this.buffer = nextBuf;
+  private pending: number[] = [];
+  constructor(private onIssue?: (issue: ProtocolIssue) => void) {}
+  reset() { this.pending = []; }
+  feed(chunk: Uint8Array): Response[] {
+    this.pending.push(...chunk); const frames: Response[] = []; let position = 0;
+    while (position + 1 < this.pending.length) {
+      if (this.pending[position] !== 0xa5 || this.pending[position + 1] !== 0x5a) { position++; continue; }
+      if (this.pending.length - position < 64) break;
+      const raw = Uint8Array.from(this.pending.slice(position, position + 64));
+      if (new DataView(raw.buffer).getUint16(62, true) !== calcCrc16(raw, 62)) { this.onIssue?.({ kind: 'crc', message: 'CRC错误，逐字节重新同步' }); position++; continue; }
+      position += 64;
+      try { frames.push(decodeFrame(raw)); } catch (error) { this.onIssue?.({ kind: raw[2] !== VERSION ? 'version' : 'structure', message: error instanceof Error ? error.message : String(error) }); }
     }
-
-    this.buffer.set(chunk, this.size);
-    this.size += chunk.length;
-
-    const frames: DecodedResponse[] = [];
-
-    while (true) {
-      // 1. 寻找帧头 A5 5A
-      let headIdx = -1;
-      for (let i = 0; i < this.size - 1; i++) {
-        if (this.buffer[i] === HEADER_0 && this.buffer[i + 1] === HEADER_1) {
-          headIdx = i;
-          break;
-        }
-      }
-
-      if (headIdx < 0) {
-        // 未找到完整头，保留最后一个字节如果是 A5
-        if (this.size > 0 && this.buffer[this.size - 1] === HEADER_0) {
-          this.buffer[0] = HEADER_0;
-          this.size = 1;
-        } else {
-          this.size = 0;
-        }
-        break;
-      }
-
-      // 丢弃头之前的垃圾数据
-      if (headIdx > 0) {
-        this.buffer.copyWithin(0, headIdx, this.size);
-        this.size -= headIdx;
-      }
-
-      // 凑齐 64B 再验 CRC
-      if (this.size < FRAME_SIZE) {
-        break;
-      }
-
-      // 提取前 64 字节候选帧
-      const candidate = this.buffer.subarray(0, FRAME_SIZE);
-      const view = new DataView(candidate.buffer, candidate.byteOffset, candidate.byteLength);
-      const rxCrc = view.getUint16(62, true);
-      const expCrc = calcCrc16(candidate, 62);
-
-      if (rxCrc !== expCrc) {
-        // CRC 错误：按协议丢一个字节继续同步，绝不可直接丢弃整帧
-        this.buffer.copyWithin(0, 1, this.size);
-        this.size -= 1;
-        continue;
-      }
-
-      // CRC 校验通过，解码帧
-      const decoded = decodeFrame(new Uint8Array(candidate));
-      if (decoded) {
-        frames.push(decoded);
-      }
-
-      // 消费 64 字节
-      this.buffer.copyWithin(0, FRAME_SIZE, this.size);
-      this.size -= FRAME_SIZE;
-    }
-
+    this.pending = this.pending.slice(position);
+    if (this.pending.length === 1 && this.pending[0] !== 0xa5) this.pending = [];
     return frames;
-  }
-
-  public reset() {
-    this.size = 0;
   }
 }

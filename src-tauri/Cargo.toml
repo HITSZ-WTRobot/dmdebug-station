@@ -1,7 +1,7 @@
 [package]
 name = "dm-debug-station"
 version = "1.0.0"
-description = "STM32 6-Axis Damiao Motor Motion Test & Telemetry Workstation"
+description = "DMDebug serial protocol v2 three-bus motor workbench"
 authors = ["DMDebugStation"]
 edition = "2021"
 
