@@ -1,0 +1,1293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DMDebug Station | STM32 六轴达妙电机运动测控工作台 (纯网页免安装独立版)</title>
+    <style>
+        :root {
+            --bg-page: #f8fafc;
+            --bg-card: #ffffff;
+            --bg-sunken: #f1f5f9;
+            --border: #e2e8f0;
+            --border-focus: #0284c7;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #64748b;
+            --accent: #0284c7;
+            --accent-hover: #0369a1;
+            --accent-soft: #e0f2fe;
+            --success: #16a34a;
+            --success-soft: #dcfce7;
+            --warning: #d97706;
+            --warning-soft: #fef3c7;
+            --danger: #dc2626;
+            --danger-soft: #fee2e2;
+            --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+            --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", Consolas, monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background-color: var(--bg-page);
+            color: var(--text-primary);
+            user-select: none;
+            -webkit-font-smoothing: antialiased;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .tnum {
+            font-variant-numeric: tabular-nums;
+            font-family: var(--font-mono);
+        }
+
+        /* 顶部导航工具栏 */
+        header {
+            height: 56px;
+            background: #ffffff;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 16px;
+            flex-shrink: 0;
+            z-index: 10;
+        }
+
+        .header-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand-badge {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: var(--accent);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: var(--font-mono);
+            font-weight: 700;
+            font-size: 14px;
+        }
+
+        .brand-text h1 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .brand-text p {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        /* 按钮与输入规范 */
+        .btn {
+            height: 32px;
+            padding: 0 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 500;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: all 0.15s ease;
+            background: transparent;
+        }
+
+        .btn:active {
+            transform: scale(0.98);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: #ffffff;
+        }
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .btn-outline {
+            border-color: var(--border);
+            background: #ffffff;
+            color: var(--text-secondary);
+        }
+        .btn-outline:hover {
+            background: var(--bg-sunken);
+            color: var(--text-primary);
+        }
+
+        .btn-danger {
+            background: var(--danger);
+            color: #ffffff;
+        }
+        .btn-danger:hover {
+            background: #b91c1c;
+        }
+
+        .btn-sm {
+            height: 28px;
+            padding: 0 10px;
+            font-size: 11px;
+            border-radius: 6px;
+        }
+
+        select, input[type="number"], input[type="text"] {
+            height: 32px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: #ffffff;
+            padding: 0 10px;
+            font-size: 12px;
+            color: var(--text-primary);
+            outline: none;
+        }
+        select:focus, input:focus {
+            border-color: var(--accent);
+        }
+
+        /* 标签 Badge */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-family: var(--font-mono);
+            font-weight: 500;
+            border: 1px solid transparent;
+        }
+        .badge-success { background: var(--success-soft); color: var(--success); border-color: #bbf7d0; }
+        .badge-warning { background: var(--warning-soft); color: var(--warning); border-color: #fde68a; }
+        .badge-danger { background: var(--danger-soft); color: var(--danger); border-color: #fecaca; }
+        .badge-neutral { background: var(--bg-sunken); color: var(--text-muted); border-color: var(--border); }
+        .badge-accent { background: var(--accent-soft); color: var(--accent); border-color: #bae6fd; }
+
+        /* 主工作布局 */
+        .main-layout {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* 左侧电机矩阵 (300px) */
+        aside {
+            width: 300px;
+            border-right: 1px solid var(--border);
+            background: #fcfdfe;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            overflow: hidden;
+        }
+
+        .aside-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            background: #ffffff;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .motor-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .motor-card {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: #ffffff;
+            padding: 10px 12px;
+            cursor: pointer;
+            transition: all 0.12s ease;
+        }
+        .motor-card:hover {
+            border-color: #cbd5e1;
+            background: #f8fafc;
+        }
+        .motor-card.active {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 1px var(--accent-soft);
+        }
+
+        .motor-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+        .motor-can-id {
+            font-family: var(--font-mono);
+            font-weight: 700;
+            font-size: 12px;
+            color: var(--text-primary);
+        }
+        .motor-name {
+            font-size: 12px;
+            font-weight: 500;
+            margin-left: 6px;
+            color: var(--text-primary);
+        }
+        .motor-model {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .motor-progress-bg {
+            height: 6px;
+            width: 100%;
+            background: var(--bg-sunken);
+            border-radius: 999px;
+            overflow: hidden;
+            margin: 6px 0 4px 0;
+        }
+        .motor-progress-bar {
+            height: 100%;
+            background: var(--accent);
+            width: 50%;
+            transition: width 0.1s linear;
+        }
+
+        .aside-footer {
+            padding: 12px;
+            border-top: 1px solid var(--border);
+            background: #ffffff;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        /* 右侧工作区 */
+        main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: var(--bg-page);
+        }
+
+        .main-header {
+            height: 56px;
+            background: #ffffff;
+            border-bottom: 1px solid var(--border);
+            padding: 0 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+
+        .tab-group {
+            display: flex;
+            align-items: center;
+            background: var(--bg-sunken);
+            border-radius: 8px;
+            padding: 2px;
+            border: 1px solid var(--border);
+        }
+        .tab-btn {
+            border: none;
+            background: transparent;
+            padding: 6px 14px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.15s ease;
+        }
+        .tab-btn.active {
+            background: #ffffff;
+            color: var(--text-primary);
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        }
+
+        .tab-content {
+            flex: 1;
+            padding: 16px;
+            overflow-y: auto;
+            display: none;
+        }
+        .tab-content.active {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        /* 示波器卡片 */
+        .card {
+            background: #ffffff;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+        }
+
+        .canvas-container {
+            flex: 1;
+            min-height: 380px;
+            width: 100%;
+            position: relative;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+            background: #ffffff;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        /* 日志窗口 */
+        .log-box {
+            flex: 1;
+            background: #ffffff;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 12px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .log-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 4px;
+            border-radius: 4px;
+        }
+        .log-row:hover { background: var(--bg-sunken); }
+        .log-time { color: var(--text-muted); shrink-0; }
+        .log-tx { color: var(--accent); font-weight: 700; shrink-0; }
+        .log-rx { color: var(--success); font-weight: 700; shrink-0; }
+        .log-warn { color: var(--warning); font-weight: 700; shrink-0; }
+        .log-hex { color: #64748b; font-size: 10px; word-break: break-all; margin-top: 2px; }
+
+        /* 滑块 */
+        input[type="range"] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 6px;
+            border-radius: 999px;
+            background: var(--border);
+            outline: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 999px;
+            background: var(--accent);
+            border: 2px solid #ffffff;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+            cursor: grab;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 顶部状态导航栏 -->
+    <header>
+        <div class="header-brand">
+            <div class="brand-badge">DM</div>
+            <div class="brand-text">
+                <h1>DMDebug Station <span style="font-size: 11px; font-weight: 400; color: var(--text-muted); font-family: var(--font-mono);">USART1 115200 8N1 (纯网页免安装独立版)</span></h1>
+                <p>六轴达妙电机运动测控与实时遥测工作台 · Web Serial 直连</p>
+            </div>
+        </div>
+
+        <div class="header-actions">
+            <!-- 模式切换与波特率 -->
+            <select id="baudSelect" title="波特率">
+                <option value="115200" selected>115200 bps</option>
+                <option value="921600">921600 bps</option>
+            </select>
+
+            <button id="btnConnect" class="btn btn-primary">
+                🔌 连接串口 (Web Serial)
+            </button>
+
+            <button id="btnDisconnect" class="btn btn-danger" style="display: none;">
+                断开串口
+            </button>
+
+            <button id="btnMock" class="btn btn-outline" title="启动内置高保真物理仿真器">
+                🧪 启动仿真器
+            </button>
+
+            <div style="height: 24px; width: 1px; background: var(--border); margin: 0 4px;"></div>
+
+            <div style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); display: flex; gap: 12px;">
+                <span id="connStatusText">未连接</span>
+                <span>TX: <span id="txCount" class="tnum">0</span></span>
+                <span>RX: <span id="rxCount" class="tnum">0</span></span>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主工作区 -->
+    <div class="main-layout">
+        <!-- 左侧：六电机状态矩阵 -->
+        <aside>
+            <div class="aside-header">
+                <span>六电机状态矩阵</span>
+                <button id="btnRefreshAll" class="btn btn-outline btn-sm" title="广播查询六电机状态 (0x10, FF)">
+                    🔄 全刷新
+                </button>
+            </div>
+
+            <div class="motor-list" id="motorListContainer">
+                <!-- 由 JS 渲染 6 个电机卡片 -->
+            </div>
+
+            <div class="aside-footer">
+                <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">全局多轴命令 (广播 0xFF)</div>
+                <div style="display: flex; gap: 8px;">
+                    <button id="btnGlobalDisable" class="btn btn-outline btn-sm" style="flex: 1;">
+                        全轴失能
+                    </button>
+                    <button id="btnGlobalStop" class="btn btn-danger btn-sm" style="flex: 1;">
+                        全轴急停
+                    </button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- 右侧主界面 -->
+        <main>
+            <!-- 选中轴头部栏 -->
+            <div class="main-header">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span id="activeMotorCanBadge" class="badge badge-accent" style="font-size: 12px;">CAN 0x0A</span>
+                    <span id="activeMotorName" style="font-size: 13px; font-weight: 600;">右前伸缩</span>
+                    <span id="activeMotorModel" style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);">(DM-S3519, Master: 0x2A)</span>
+                </div>
+
+                <div class="tab-group">
+                    <button class="tab-btn active" data-tab="tabScope">遥测示波器</button>
+                    <button class="tab-btn" data-tab="tabControl">运动控制与标定</button>
+                    <button class="tab-btn" data-tab="tabParams">动力学限位</button>
+                    <button class="tab-btn" data-tab="tabBus">总线报文监视</button>
+                </div>
+            </div>
+
+            <!-- Tab 1: 实时示波器 -->
+            <div id="tabScope" class="tab-content active">
+                <div class="card" style="padding: 10px 16px; display: flex; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; gap: 16px; font-size: 12px;">
+                        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                            <input type="checkbox" id="chkShowPos" checked>
+                            <span style="height: 8px; width: 8px; border-radius: 50%; background: var(--accent);"></span>
+                            <span>位置角度 (°)</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                            <input type="checkbox" id="chkShowVel" checked>
+                            <span style="height: 8px; width: 8px; border-radius: 50%; background: var(--success);"></span>
+                            <span>转速 (rpm)</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                            <input type="checkbox" id="chkShowTrq" checked>
+                            <span style="height: 8px; width: 8px; border-radius: 50%; background: var(--warning);"></span>
+                            <span>力矩 (Nm)</span>
+                        </label>
+                    </div>
+
+                    <div style="display: flex; gap: 8px;">
+                        <button id="btnScopePause" class="btn btn-outline btn-sm">暂停</button>
+                        <button id="btnScopeClear" class="btn btn-outline btn-sm">清空</button>
+                        <button id="btnScopeExport" class="btn btn-outline btn-sm">导出 CSV</button>
+                    </div>
+                </div>
+
+                <div class="canvas-container">
+                    <canvas id="scopeCanvas"></canvas>
+                </div>
+            </div>
+
+            <!-- Tab 2: 运动控制 -->
+            <div id="tabControl" class="tab-content">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                    <div class="card" style="display: flex; flex-direction: column; gap: 16px;">
+                        <div style="font-size: 13px; font-weight: 600;">位置伺服运动 (Move, Opcode 0x24)</div>
+                        <div>
+                            <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px;">
+                                <span style="color: var(--text-muted);">目标位置 (绝对角度)</span>
+                                <span id="lblTargetAngle" class="tnum" style="font-size: 16px; font-weight: 700; color: var(--accent);">0.00°</span>
+                            </div>
+                            <input type="range" id="rngTargetAngle" min="-30" max="30" step="0.1" value="0">
+                            <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); margin-top: 4px;">
+                                <span id="lblMinBound">-30°</span>
+                                <span>0°</span>
+                                <span id="lblMaxBound">+30°</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <span style="font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px;">步进微调</span>
+                            <div style="display: flex; gap: 6px;">
+                                <button class="btn btn-outline btn-sm btn-step" data-step="-5.0">-5°</button>
+                                <button class="btn btn-outline btn-sm btn-step" data-step="-1.0">-1°</button>
+                                <button class="btn btn-outline btn-sm btn-step" data-step="-0.2">-0.2°</button>
+                                <button class="btn btn-outline btn-sm btn-step" data-step="0.2">+0.2°</button>
+                                <button class="btn btn-outline btn-sm btn-step" data-step="1.0">+1°</button>
+                                <button class="btn btn-outline btn-sm btn-step" data-step="5.0">+5°</button>
+                            </div>
+                        </div>
+
+                        <div style="display: flex; gap: 8px; margin-top: 8px;">
+                            <button id="btnExecuteMove" class="btn btn-primary" style="flex: 1;">
+                                执行绝对运动 (Move)
+                            </button>
+                            <button id="btnStopMotor" class="btn btn-danger">
+                                停止 (Stop)
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="card" style="display: flex; flex-direction: column; gap: 14px;">
+                        <div style="font-size: 13px; font-weight: 600;">软件归零校准 (SetZero, Opcode 0x23)</div>
+                        <p style="font-size: 12px; color: var(--text-secondary); line-height: 1.5;">
+                            将当前电机物理位置标定为软件零点坐标（0.0°）。已有运动限位将自动平移以保持物理工作区不变。
+                        </p>
+                        <div style="background: var(--warning-soft); border: 1px solid #fde68a; border-radius: 8px; padding: 10px; font-size: 11px; color: #92400e;">
+                            ⚠️ 安全规范：根据协议要求，归零仅允许在失能、静止且稳定的状态下执行。
+                        </div>
+                        <button id="btnSetZero" class="btn btn-outline" style="margin-top: auto;">
+                            校准当前点为软件零点 (SetZero)
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 3: 动力学限位 -->
+            <div id="tabParams" class="tab-content">
+                <div class="card" style="display: flex; flex-direction: column; gap: 16px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 13px; font-weight: 600;">已应用限位与动力学配置 (Opcode 0x11 / 0x25)</span>
+                        <button id="btnRefreshParams" class="btn btn-outline btn-sm">刷新参数</button>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-secondary); display: block; margin-bottom: 4px;">最小行程限位 (min_deg, °)</label>
+                            <input type="number" id="inpMinDeg" style="width: 100%;" value="-30">
+                        </div>
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-secondary); display: block; margin-bottom: 4px;">最大行程限位 (max_deg, °)</label>
+                            <input type="number" id="inpMaxDeg" style="width: 100%;" value="30">
+                        </div>
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-secondary); display: block; margin-bottom: 4px;">轨迹速度上限 (max_vel, deg/s)</label>
+                            <input type="number" id="inpMaxVel" style="width: 100%;" value="10">
+                        </div>
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-secondary); display: block; margin-bottom: 4px;">加速度上限 (max_acc, deg/s²)</label>
+                            <input type="number" id="inpMaxAcc" style="width: 100%;" value="20">
+                        </div>
+                        <div>
+                            <label style="font-size: 11px; color: var(--text-secondary); display: block; margin-bottom: 4px;">加加速度上限 (max_jerk, deg/s³)</label>
+                            <input type="number" id="inpMaxJerk" style="width: 100%;" value="100">
+                        </div>
+                    </div>
+
+                    <div style="display: flex; justify-content: flex-end; margin-top: 8px;">
+                        <button id="btnApplyLimits" class="btn btn-primary">
+                            下发动力学限位 (SetLimits)
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 4: 报文监视 -->
+            <div id="tabBus" class="tab-content">
+                <div class="card" style="padding: 10px 16px; display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 12px; font-weight: 600;">64 字节定长二进制报文流监视</span>
+                    <button id="btnClearLog" class="btn btn-outline btn-sm">清空记录</button>
+                </div>
+                <div class="log-box" id="logBox">
+                    <!-- 动态报文 -->
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 核心逻辑脚本 (协议 + Web Serial + 仿真机 + 示波器 + 交互) -->
+    <script>
+    (function() {
+        'use strict';
+
+        // 1. 六电机定义
+        const MOTORS = [
+            { index: 0, name: '右前伸缩', model: 'DM-S3519', canId: 0x0A, masterId: 0x2A, minDeg: -30, maxDeg: 30 },
+            { index: 1, name: '中伸缩',   model: 'DM-S3519', canId: 0x0B, masterId: 0x2B, minDeg: -30, maxDeg: 30 },
+            { index: 2, name: '后伸缩',   model: 'DM-S3519', canId: 0x0C, masterId: 0x2C, minDeg: -30, maxDeg: 30 },
+            { index: 3, name: '左前旋转', model: 'DM-J4340P', canId: 0x0D, masterId: 0x2D, minDeg: -180, maxDeg: 180 },
+            { index: 4, name: '左前伸缩', model: 'DM-S3519', canId: 0x0E, masterId: 0x2E, minDeg: -30, maxDeg: 30 },
+            { index: 5, name: '右前旋转', model: 'DM-J4340P', canId: 0x0F, masterId: 0x2F, minDeg: -180, maxDeg: 180 },
+        ];
+
+        let selectedCanId = 0x0A;
+        let isConnected = false;
+        let isMockMode = false;
+        let txTotal = 0;
+        let rxTotal = 0;
+
+        // 电机运行时状态表
+        const runtimeStates = {};
+        MOTORS.forEach(m => {
+            runtimeStates[m.canId] = {
+                config: m,
+                positionDeg: 0.0,
+                referenceDeg: 0.0,
+                velocityRpm: 0.0,
+                torqueNm: 0.0,
+                enabled: false,
+                busy: false,
+                fault: false,
+                motionComplete: true,
+                minDeg: m.minDeg,
+                maxDeg: m.maxDeg,
+                maxVel: 10,
+                maxAcc: 20,
+                maxJerk: 100
+            };
+        });
+
+        // 2. CRC-16/CCITT-FALSE
+        const CRC_TABLE = new Uint16Array(256);
+        for (let i = 0; i < 256; i++) {
+            let curr = (i << 8) & 0xffff;
+            for (let j = 0; j < 8; j++) {
+                if ((curr & 0x8000) !== 0) {
+                    curr = ((curr << 1) ^ 0x1021) & 0xffff;
+                } else {
+                    curr = (curr << 1) & 0xffff;
+                }
+            }
+            CRC_TABLE[i] = curr;
+        }
+
+        function calcCrc16(buf, len = buf.length) {
+            let crc = 0xffff;
+            for (let i = 0; i < len; i++) {
+                crc = ((crc << 8) ^ CRC_TABLE[((crc >> 8) ^ buf[i]) & 0xff]) & 0xffff;
+            }
+            return crc;
+        }
+
+        function encodeFrame(seq, opcode, motor, payload = new Uint8Array(0)) {
+            const buf = new Uint8Array(64);
+            const view = new DataView(buf.buffer);
+            buf[0] = 0xA5;
+            buf[1] = 0x5A;
+            buf[2] = 0x01; // ver
+            buf[3] = 0x00; // req
+            view.setUint16(4, seq & 0xffff, true);
+            buf[6] = opcode & 0xff;
+            buf[7] = motor & 0xff;
+            view.setUint16(8, payload.length, true);
+            view.setUint16(10, 0, true);
+            if (payload.length > 0) buf.set(payload, 12);
+            const crc = calcCrc16(buf, 62);
+            view.setUint16(62, crc, true);
+            return buf;
+        }
+
+        function bytesToHex(arr) {
+            let hex = '';
+            for (let i = 0; i < arr.length; i++) {
+                hex += arr[i].toString(16).padStart(2, '0').toUpperCase() + ' ';
+            }
+            return hex.trim();
+        }
+
+        // 3. 流式分包器
+        class StreamUnpacker {
+            constructor() {
+                this.buf = new Uint8Array(4096);
+                this.len = 0;
+            }
+            feed(chunk) {
+                if (this.len + chunk.length > this.buf.length) {
+                    const next = new Uint8Array(this.buf.length * 2);
+                    next.set(this.buf.subarray(0, this.len));
+                    this.buf = next;
+                }
+                this.buf.set(chunk, this.len);
+                this.len += chunk.length;
+
+                const frames = [];
+                while (true) {
+                    let head = -1;
+                    for (let i = 0; i < this.len - 1; i++) {
+                        if (this.buf[i] === 0xA5 && this.buf[i + 1] === 0x5A) {
+                            head = i;
+                            break;
+                        }
+                    }
+                    if (head < 0) {
+                        this.len = (this.len > 0 && this.buf[this.len - 1] === 0xA5) ? 1 : 0;
+                        if (this.len === 1) this.buf[0] = 0xA5;
+                        break;
+                    }
+                    if (head > 0) {
+                        this.buf.copyWithin(0, head, this.len);
+                        this.len -= head;
+                    }
+                    if (this.len < 64) break;
+
+                    const cand = this.buf.subarray(0, 64);
+                    const view = new DataView(cand.buffer, cand.byteOffset, 64);
+                    const rxCrc = view.getUint16(62, true);
+                    if (rxCrc !== calcCrc16(cand, 62)) {
+                        this.buf.copyWithin(0, 1, this.len);
+                        this.len -= 1;
+                        continue;
+                    }
+
+                    frames.push(new Uint8Array(cand));
+                    this.buf.copyWithin(0, 64, this.len);
+                    this.len -= 64;
+                }
+                return frames;
+            }
+        }
+
+        const unpacker = new StreamUnpacker();
+
+        // 4. 示波器引擎
+        const canvas = document.getElementById('scopeCanvas');
+        const ctx = canvas.getContext('2d');
+        const scopeData = [];
+        let scopePaused = false;
+
+        function resizeCanvas() {
+            const rect = canvas.parentElement.getBoundingClientRect();
+            canvas.width = rect.width * (window.devicePixelRatio || 1);
+            canvas.height = rect.height * (window.devicePixelRatio || 1);
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        function renderScope() {
+            requestAnimationFrame(renderScope);
+            const dpr = window.devicePixelRatio || 1;
+            const w = canvas.width / dpr;
+            const h = canvas.height / dpr;
+            if (w <= 0 || h <= 0) return;
+
+            ctx.save();
+            ctx.scale(dpr, dpr);
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+
+            const padL = 48, padR = 16, padT = 16, padB = 20;
+            const plotW = Math.max(10, w - padL - padR);
+            const plotH = Math.max(10, h - padT - padB);
+
+            // 底板与网格
+            ctx.fillStyle = '#fafbfc';
+            ctx.fillRect(padL, padT, plotW, plotH);
+            ctx.strokeStyle = '#e2e8f0';
+            ctx.lineWidth = 1;
+
+            for (let i = 0; i <= 4; i++) {
+                const y = padT + (plotH / 4) * i;
+                ctx.beginPath();
+                ctx.moveTo(padL, y);
+                ctx.lineTo(padL + plotW, y);
+                ctx.stroke();
+            }
+            ctx.strokeRect(padL, padT, plotW, plotH);
+
+            // 数据极值
+            let minY = -10, maxY = 10;
+            if (scopeData.length > 0) {
+                let min = Infinity, max = -Infinity;
+                scopeData.forEach(pt => {
+                    min = Math.min(min, pt.pos, pt.ref, pt.vel, pt.trq);
+                    max = Math.max(max, pt.pos, pt.ref, pt.vel, pt.trq);
+                });
+                if (min !== Infinity && max !== -Infinity) {
+                    const span = Math.max(0.5, max - min);
+                    minY = min - span * 0.15;
+                    maxY = max + span * 0.15;
+                }
+            }
+
+            ctx.fillStyle = '#64748b';
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            for (let i = 0; i <= 4; i++) {
+                const y = padT + (plotH / 4) * i;
+                const v = maxY - ((maxY - minY) / 4) * i;
+                ctx.fillText(v.toFixed(1), padL - 6, y);
+            }
+
+            const toY = val => padT + plotH - ((val - minY) / (maxY - minY || 1)) * plotH;
+
+            if (scopeData.length > 1) {
+                const stepX = plotW / 299;
+                const startX = padL + (300 - scopeData.length) * stepX;
+
+                // 实际位置 (蓝)
+                if (document.getElementById('chkShowPos').checked) {
+                    ctx.strokeStyle = '#0284c7';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    scopeData.forEach((pt, i) => {
+                        const x = startX + i * stepX;
+                        const y = toY(pt.pos);
+                        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                    });
+                    ctx.stroke();
+                }
+
+                // 速度 (绿)
+                if (document.getElementById('chkShowVel').checked) {
+                    ctx.strokeStyle = '#16a34a';
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    scopeData.forEach((pt, i) => {
+                        const x = startX + i * stepX;
+                        const y = toY(pt.vel);
+                        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                    });
+                    ctx.stroke();
+                }
+
+                // 力矩 (橙)
+                if (document.getElementById('chkShowTrq').checked) {
+                    ctx.strokeStyle = '#d97706';
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    scopeData.forEach((pt, i) => {
+                        const x = startX + i * stepX;
+                        const y = toY(pt.trq);
+                        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                    });
+                    ctx.stroke();
+                }
+            }
+
+            ctx.restore();
+        }
+        renderScope();
+
+        // 5. 日志与统计
+        const logBox = document.getElementById('logBox');
+        function addLog(type, msg, hex) {
+            const row = document.createElement('div');
+            row.className = 'log-row';
+            const t = new Date().toTimeString().split(' ')[0] + '.' + String(Date.now() % 1000).padStart(3, '0');
+            row.innerHTML = `<span class="log-time">${t}</span><span class="log-${type}">[${type.toUpperCase()}]</span><div><div>${msg}</div>${hex ? `<div class="log-hex">${hex}</div>` : ''}</div>`;
+            logBox.appendChild(row);
+            if (logBox.children.length > 300) logBox.removeChild(logBox.children[0]);
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        // 6. UI 渲染与更新
+        const motorListContainer = document.getElementById('motorListContainer');
+
+        function renderMotorList() {
+            motorListContainer.innerHTML = '';
+            MOTORS.forEach(m => {
+                const st = runtimeStates[m.canId];
+                const card = document.createElement('div');
+                card.className = `motor-card ${m.canId === selectedCanId ? 'active' : ''}`;
+                card.onclick = () => selectMotor(m.canId);
+
+                const span = Math.max(1, st.maxDeg - st.minDeg);
+                const pct = Math.min(100, Math.max(0, ((st.positionDeg - st.minDeg) / span) * 100));
+
+                card.innerHTML = `
+                    <div class="motor-card-header">
+                        <div>
+                            <span class="motor-can-id">0x${m.canId.toString(16).toUpperCase()}</span>
+                            <span class="motor-name">${m.name}</span>
+                        </div>
+                        <span class="motor-model">${m.model}</span>
+                    </div>
+                    <div style="display: flex; gap: 4px; margin-bottom: 4px;">
+                        <span class="badge ${st.enabled ? 'badge-success' : 'badge-neutral'}">${st.enabled ? '已使能' : '已失能'}</span>
+                        ${st.busy ? '<span class="badge badge-warning">运动中</span>' : ''}
+                        ${st.motionComplete && st.enabled && !st.busy ? '<span class="badge badge-accent">到位</span>' : ''}
+                    </div>
+                    <div class="motor-progress-bg">
+                        <div class="motor-progress-bar" style="width: ${pct}%;"></div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);">
+                        <span>${st.minDeg}°</span>
+                        <span style="font-weight: 700; color: var(--text-primary);">${st.positionDeg.toFixed(2)}°</span>
+                        <span>${st.maxDeg}°</span>
+                    </div>
+                `;
+                motorListContainer.appendChild(card);
+            });
+        }
+
+        function selectMotor(canId) {
+            selectedCanId = canId;
+            const m = MOTORS.find(item => item.canId === canId);
+            const st = runtimeStates[canId];
+
+            document.getElementById('activeMotorCanBadge').textContent = `CAN 0x${canId.toString(16).toUpperCase()}`;
+            document.getElementById('activeMotorName').textContent = m.name;
+            document.getElementById('activeMotorModel').textContent = `(${m.model}, Master: 0x${m.masterId.toString(16).toUpperCase()})`;
+
+            document.getElementById('rngTargetAngle').min = st.minDeg;
+            document.getElementById('rngTargetAngle').max = st.maxDeg;
+            document.getElementById('lblMinBound').textContent = `${st.minDeg}°`;
+            document.getElementById('lblMaxBound').textContent = `${st.maxDeg}°`;
+
+            document.getElementById('rngTargetAngle').value = st.positionDeg;
+            document.getElementById('lblTargetAngle').textContent = `${st.positionDeg.toFixed(2)}°`;
+
+            document.getElementById('inpMinDeg').value = st.minDeg;
+            document.getElementById('inpMaxDeg').value = st.maxDeg;
+            document.getElementById('inpMaxVel').value = st.maxVel;
+            document.getElementById('inpMaxAcc').value = st.maxAcc;
+            document.getElementById('inpMaxJerk').value = st.maxJerk;
+
+            renderMotorList();
+        }
+
+        renderMotorList();
+
+        // 7. 高保真仿真机与物理演化
+        let mockInterval = null;
+        function runMockTick() {
+            MOTORS.forEach(m => {
+                const st = runtimeStates[m.canId];
+                if (!st.enabled || !st.busy) {
+                    st.velocityRpm = 0.0;
+                    st.torqueNm = 0.0;
+                    return;
+                }
+                const diff = st.targetDeg - st.positionDeg;
+                const dist = Math.abs(diff);
+                if (dist <= 0.2) {
+                    st.positionDeg = st.targetDeg;
+                    st.referenceDeg = st.targetDeg;
+                    st.velocityRpm = 0.0;
+                    st.torqueNm = 0.05;
+                    st.busy = false;
+                    st.motionComplete = true;
+                } else {
+                    const step = Math.sign(diff) * Math.min(dist, st.maxVel * 0.02);
+                    st.positionDeg += step;
+                    st.referenceDeg = st.positionDeg;
+                    st.velocityRpm = (step / 0.02) / 6.0;
+                    st.torqueNm = Math.sin(st.positionDeg * 0.05) * 0.8 + 0.3;
+                    st.motionComplete = false;
+                }
+            });
+
+            // 推入示波器
+            if (!scopePaused) {
+                const curr = runtimeStates[selectedCanId];
+                scopeData.push({
+                    pos: curr.positionDeg,
+                    ref: curr.referenceDeg,
+                    vel: curr.velocityRpm,
+                    trq: curr.torqueNm
+                });
+                if (scopeData.length > 300) scopeData.shift();
+            }
+
+            renderMotorList();
+        }
+
+        // 8. 交互事件绑定
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.onclick = () => {
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                btn.classList.add('active');
+                document.getElementById(btn.dataset.tab).classList.add('active');
+                if (btn.dataset.tab === 'tabScope') resizeCanvas();
+            };
+        });
+
+        const rngTarget = document.getElementById('rngTargetAngle');
+        const lblTarget = document.getElementById('lblTargetAngle');
+        rngTarget.oninput = () => {
+            lblTarget.textContent = `${Number(rngTarget.value).toFixed(2)}°`;
+        };
+
+        document.querySelectorAll('.btn-step').forEach(btn => {
+            btn.onclick = () => {
+                const step = Number(btn.dataset.step);
+                const curr = Number(rngTarget.value);
+                const next = Math.max(Number(rngTarget.min), Math.min(Number(rngTarget.max), curr + step));
+                rngTarget.value = next;
+                lblTarget.textContent = `${next.toFixed(2)}°`;
+            };
+        });
+
+        // 运动执行 (Move)
+        document.getElementById('btnExecuteMove').onclick = () => {
+            const st = runtimeStates[selectedCanId];
+            if (!st.enabled) {
+                alert('请先使能电机！');
+                return;
+            }
+            const target = Number(rngTarget.value);
+            st.targetDeg = target;
+            st.busy = true;
+            st.motionComplete = false;
+
+            const payload = new Uint8Array(4);
+            new DataView(payload.buffer).setFloat32(0, target, true);
+            const frame = encodeFrame(++txTotal, 0x24, selectedCanId, payload);
+            addLog('tx', `[Move] 电机 0x${selectedCanId.toString(16).toUpperCase()} 目标角度: ${target.toFixed(2)}°`, bytesToHex(frame));
+            document.getElementById('txCount').textContent = txTotal;
+        };
+
+        // 停止 (Stop)
+        document.getElementById('btnStopMotor').onclick = () => {
+            const st = runtimeStates[selectedCanId];
+            st.busy = false;
+            st.motionComplete = true;
+            const frame = encodeFrame(++txTotal, 0x22, selectedCanId);
+            addLog('tx', `[Stop] 急停电机 0x${selectedCanId.toString(16).toUpperCase()}`, bytesToHex(frame));
+            document.getElementById('txCount').textContent = txTotal;
+        };
+
+        // 全局急停
+        document.getElementById('btnGlobalStop').onclick = () => {
+            MOTORS.forEach(m => {
+                runtimeStates[m.canId].busy = false;
+                runtimeStates[m.canId].motionComplete = true;
+            });
+            const frame = encodeFrame(++txTotal, 0x22, 0xFF);
+            addLog('tx', `[Broadcast Stop] 广播全轴急停 (0xFF)`, bytesToHex(frame));
+            document.getElementById('txCount').textContent = txTotal;
+            renderMotorList();
+        };
+
+        // 全局失能
+        document.getElementById('btnGlobalDisable').onclick = () => {
+            MOTORS.forEach(m => {
+                runtimeStates[m.canId].enabled = false;
+                runtimeStates[m.canId].busy = false;
+            });
+            const frame = encodeFrame(++txTotal, 0x21, 0xFF);
+            addLog('tx', `[Broadcast Disable] 广播全轴失能 (0xFF)`, bytesToHex(frame));
+            document.getElementById('txCount').textContent = txTotal;
+            renderMotorList();
+        };
+
+        // 归零 (SetZero)
+        document.getElementById('btnSetZero').onclick = () => {
+            const st = runtimeStates[selectedCanId];
+            if (st.enabled) {
+                alert('归零操作仅允许在失能状态下执行！');
+                return;
+            }
+            if (confirm(`确认校准当前位置为 0.0° 原点？限位将自动平移。`)) {
+                st.positionDeg = 0.0;
+                st.referenceDeg = 0.0;
+                const frame = encodeFrame(++txTotal, 0x23, selectedCanId);
+                addLog('tx', `[SetZero] 软件归零 0x${selectedCanId.toString(16).toUpperCase()}`, bytesToHex(frame));
+                document.getElementById('txCount').textContent = txTotal;
+                renderMotorList();
+            }
+        };
+
+        // 限位下发 (SetLimits)
+        document.getElementById('btnApplyLimits').onclick = () => {
+            const min = Number(document.getElementById('inpMinDeg').value);
+            const max = Number(document.getElementById('inpMaxDeg').value);
+            const vel = Number(document.getElementById('inpMaxVel').value);
+            const acc = Number(document.getElementById('inpMaxAcc').value);
+            const jrk = Number(document.getElementById('inpMaxJerk').value);
+            if (min >= max || vel <= 0 || acc <= 0 || jrk <= 0) {
+                alert('限位参数非法，请检查！');
+                return;
+            }
+            const st = runtimeStates[selectedCanId];
+            st.minDeg = min;
+            st.maxDeg = max;
+            st.maxVel = vel;
+            st.maxAcc = acc;
+            st.maxJerk = jrk;
+
+            const p = new Uint8Array(20);
+            const v = new DataView(p.buffer);
+            v.setFloat32(0, min, true);
+            v.setFloat32(4, max, true);
+            v.setFloat32(8, vel, true);
+            v.setFloat32(12, acc, true);
+            v.setFloat32(16, jrk, true);
+            const frame = encodeFrame(++txTotal, 0x25, selectedCanId, p);
+            addLog('tx', `[SetLimits] 下发限位 0x${selectedCanId.toString(16).toUpperCase()}: [${min}°, ${max}°]`, bytesToHex(frame));
+            document.getElementById('txCount').textContent = txTotal;
+            selectMotor(selectedCanId);
+        };
+
+        // 示波器控制
+        document.getElementById('btnScopePause').onclick = () => {
+            scopePaused = !scopePaused;
+            document.getElementById('btnScopePause').textContent = scopePaused ? '继续' : '暂停';
+        };
+        document.getElementById('btnScopeClear').onclick = () => {
+            scopeData.length = 0;
+        };
+        document.getElementById('btnScopeExport').onclick = () => {
+            let csv = 'Index,Pos_deg,Ref_deg,Vel_rpm,Trq_Nm\n';
+            scopeData.forEach((d, i) => {
+                csv += `${i},${d.pos.toFixed(3)},${d.ref.toFixed(3)},${d.vel.toFixed(2)},${d.trq.toFixed(2)}\n`;
+            });
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `dm_telemetry_${Date.now()}.csv`;
+            a.click();
+        };
+
+        // 仿真器开关
+        document.getElementById('btnMock').onclick = () => {
+            if (!isMockMode) {
+                isMockMode = true;
+                document.getElementById('btnMock').textContent = '⏹ 停止仿真';
+                document.getElementById('connStatusText').textContent = '仿真器运行中';
+                mockInterval = setInterval(runMockTick, 20);
+                addLog('rx', '已启动内置六电机高保真物理仿真器 (Mock MCU Online)');
+            } else {
+                isMockMode = false;
+                clearInterval(mockInterval);
+                document.getElementById('btnMock').textContent = '🧪 启动仿真器';
+                document.getElementById('connStatusText').textContent = '未连接';
+                addLog('warn', '已停止仿真器');
+            }
+        };
+
+        // 网页端 Web Serial 硬件连接
+        let serialPort = null;
+        let serialReader = null;
+        let serialWriter = null;
+
+        document.getElementById('btnConnect').onclick = async () => {
+            if (!('serial' in navigator)) {
+                alert('当前浏览器不支持 Web Serial API，请使用 Chrome 或 Edge 浏览器！');
+                return;
+            }
+            try {
+                const baud = Number(document.getElementById('baudSelect').value);
+                serialPort = await navigator.serial.requestPort();
+                await serialPort.open({ baudRate: baud });
+                serialWriter = serialPort.writable.getWriter();
+                serialReader = serialPort.readable.getReader();
+
+                isConnected = true;
+                document.getElementById('btnConnect').style.display = 'none';
+                document.getElementById('btnDisconnect').style.display = 'inline-flex';
+                document.getElementById('connStatusText').textContent = `已连接 @ ${baud}`;
+                addLog('rx', `Web Serial 串口连接成功 @ ${baud} bps`);
+
+                readSerialLoop();
+            } catch (err) {
+                console.error(err);
+                alert(`连接失败: ${err.message}`);
+            }
+        };
+
+        document.getElementById('btnDisconnect').onclick = async () => {
+            if (serialReader) {
+                await serialReader.cancel();
+                serialReader.releaseLock();
+                serialReader = null;
+            }
+            if (serialWriter) {
+                serialWriter.releaseLock();
+                serialWriter = null;
+            }
+            if (serialPort) {
+                await serialPort.close();
+                serialPort = null;
+            }
+            isConnected = false;
+            document.getElementById('btnConnect').style.display = 'inline-flex';
+            document.getElementById('btnDisconnect').style.display = 'none';
+            document.getElementById('connStatusText').textContent = '未连接';
+            addLog('warn', '串口已断开连接');
+        };
+
+        async function readSerialLoop() {
+            while (isConnected && serialReader) {
+                try {
+                    const { value, done } = await serialReader.read();
+                    if (done) break;
+                    if (value) {
+                        rxTotal++;
+                        document.getElementById('rxCount').textContent = rxTotal;
+                        const frames = unpacker.feed(value);
+                        frames.forEach(f => {
+                            const opcode = f[6];
+                            const motor = f[7];
+                            addLog('rx', `收到 64B 应答: Opcode 0x${opcode.toString(16)} (Motor: 0x${motor.toString(16)})`, bytesToHex(f));
+                        });
+                    }
+                } catch (e) {
+                    console.error(e);
+                    break;
+                }
+            }
+        }
+
+        // 默认自动自启仿真器测试
+        document.getElementById('btnMock').click();
+        // 默认将选中电机使能以便直接测试
+        runtimeStates[0x0A].enabled = true;
+        renderMotorList();
+    })();
+    </script>
+</body>
+</html>
