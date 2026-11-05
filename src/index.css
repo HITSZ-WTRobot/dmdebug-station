@@ -94,6 +94,9 @@ input[type=number] { font-family: var(--mono); font-variant-numeric: tabular-num
 .parameter-section { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 16px; }.parameter-section h3, .parameter-section > summary { font-size: 12px; font-weight: 600; line-height: 20px; margin: 0 0 8px; }.parameter-section > p { font-size: 10px; line-height: 18px; margin: 8px 0 12px; }
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin-bottom: 12px; }.field label { font-size: 10px; line-height: 16px; color: #647487; }.field input { font-size: 12px; }
 .field-row { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }.field-grid3 { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }.field-grid3 .field label { min-height: 32px; }.field-grid3 input { padding: 8px; }
+.tuning-files { margin-top: 16px; align-items: flex-start; }
+.tuning-files .field { width: 100%; color: var(--secondary); font-size: 10px; }
+.tuning-files input { width: 100%; font-size: 10px; }
 .empty-state { padding: 24px; text-align: center; color: var(--muted); font-size: 12px; line-height: 22px; grid-column: 1/-1; }
 .segmented { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid #e0e5ea; border-radius: 6px; background: #f4f6f8; }.segmented button { border: 1px solid transparent; border-radius: 4px; padding: 5px 10px; background: transparent; color: #718091; font-size: 11px; }.segmented button.active { background: white; border-color: #d7e0e8; color: #2d5e88; }
 .scope-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); }.scope-toolbar .actions { gap: 4px; }
@@ -119,3 +122,29 @@ input[type=number] { font-family: var(--mono); font-variant-numeric: tabular-num
 @media (max-width: 1050px) { .workspace-grid { grid-template-columns: minmax(0,1fr); }.controls-column { order: 1; }.telemetry-column { order: 2; }.quiet-meta { display: none; }.control-panel > .panel-heading > .button { max-width: none; }.readout-grid { grid-template-columns: repeat(4,minmax(0,1fr)); }.scope-plot, .scope-waiting { min-height: 260px; }.selection-heading { flex-wrap: wrap; }.traffic { gap: 8px; }.session-strip > span:not(.status-dot) { flex: 1; } }
 @media (max-width: 720px) { .app-header { padding: 12px 16px; height: auto; min-height: 64px; gap: 12px; }.brand { gap: 8px; }.brand strong { font-size: 13px; }.header-actions .button { font-size: 10px; padding: 6px 8px; }.connection-bar { padding: 12px 16px; }.connection-settings { gap: 12px 8px; }.connection-field select { min-width: 150px; }.port-hint { max-width: 160px; }.connection-progress { gap: 8px; }.session-strip { padding: 8px 16px; flex-wrap: wrap; }.session-strip > span:not(.status-dot) { flex-basis: 70%; }.traffic { width: 100%; margin-left: 14px; }.app-body { grid-template-columns: 1fr; }.device-sidebar { border-right: 0; border-bottom: 1px solid var(--line); padding: 12px 16px; }.sidebar-heading { padding: 0; }.bus-group { display: flex; gap: 8px; overflow-x: auto; align-items: stretch; margin-top: 12px; padding-bottom: 4px; }.bus-heading { flex: 0 0 86px; flex-direction: column; align-items: flex-start; justify-content: center; gap: 4px; }.device-row { flex: 0 0 174px; width: 174px; margin: 0; background: #f5f7f9; }.sidebar-note { display: none; }.main-workspace { padding: 20px 16px; }.selection-heading h1 { font-size: 22px; flex-wrap: wrap; gap: 8px; }.readout-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }.scope-toolbar { gap: 8px; }.scope-toolbar .actions { width: 100%; }.workspace-footer { flex-direction: column; gap: 4px; }.log-panel .panel-heading { flex-wrap: wrap; }.log-panel .actions { gap: 4px; }.log-lines { padding: 8px 12px; }.log-line summary { gap: 8px; flex-wrap: wrap; }.raw-frame { padding-left: 0; }.wheel-table-row small { display: block; margin-left: 0; }.demo-banner { padding: 8px 16px; align-items: flex-start; }.scope-axis-label { font-size: 13px; }.panel-heading { padding: 16px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+/* Ozone 独立调参页沿用工作台的仪器面板样式，内部单位与地址始终可见。 */
+.page-navigation { display: flex; gap: 8px; padding: 10px 24px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.ozone-page { max-width: 1380px; margin: 0 auto; padding: 24px; }
+.ozone-page .selection-heading h1 { margin-top: 0; }
+.ozone-page .selection-heading .field { min-width: 240px; font-size: 11px; color: var(--secondary); }
+.ozone-content { padding: 16px 20px 20px; }
+.ozone-content > .muted { font-size: 12px; line-height: 1.8; }
+.ozone-authorization { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 20px; margin: 16px 0; }
+.ozone-authorization input { width: 16px; height: 16px; flex-shrink: 0; margin-top: 2px; }
+.ozone-parameters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 20px; }
+.ozone-parameter { padding: 16px; border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+.ozone-parameter-title { display: flex; gap: 12px; justify-content: space-between; align-items: baseline; font-size: 13px; margin-bottom: 16px; }
+.ozone-parameter-title label { font-weight: 600; }
+.ozone-parameter-title code { display: block; font-size: 11px; color: var(--secondary); margin-top: 4px; font-weight: 400; }
+.ozone-parameter-title > span { color: var(--secondary); font-size: 11px; }
+.ozone-value-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 12px; }
+.ozone-value-row .eyebrow, .ozone-value-row output { display: block; overflow-wrap: anywhere; }
+.ozone-value-row output { font-size: 15px; padding-top: 8px; }
+.ozone-value-row input { width: 100%; min-width: 0; }
+.ozone-value-row > button { grid-column: 1 / -1; justify-self: start; }
+.ozone-parameter p { font-size: 11px; line-height: 1.7; }
+.ozone-locations { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line-soft); font-size: 10px; line-height: 1.8; }
+.ozone-locations > div { display: grid; gap: 3px; margin-bottom: 8px; }
+.ozone-locations code { overflow-wrap: anywhere; color: var(--secondary); }
+@media (max-width: 900px) { .ozone-parameters { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 720px) { .ozone-page { padding: 16px; } .ozone-content { padding: 12px; } .page-navigation { padding: 10px 16px; } }

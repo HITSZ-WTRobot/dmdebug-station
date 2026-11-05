@@ -5,7 +5,7 @@
   "description": "Three-bus motor workbench for DMDebug serial protocol v2",
   "type": "module",
   "scripts": {
-    "test": "node --experimental-transform-types --import ./tests/register-typescript.mjs --test tests/transport.test.ts",
+    "test": "node --experimental-transform-types --import ./tests/register-typescript.mjs --test tests/*.test.ts",
     "dev": "vite",
     "build": "tsc && vite build && node scripts/export-portable.mjs",
     "build:web": "npm run build",

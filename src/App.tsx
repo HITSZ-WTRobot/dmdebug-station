@@ -7,6 +7,7 @@ import { TransportManager, getPlatformInfo, listNativeSerialPorts, isTauriEnviro
 import { DeviceControls } from './components/DeviceControls';
 import { TelemetryPanel } from './components/TelemetryPanel';
 import { CommunicationRow } from './components/CommunicationRow';
+import { OzoneTuningPage } from './components/OzoneTuningPage';
 
 function deviceStatus(device: DeviceSnapshot, now: number, sessionReady: boolean) {
   const state = device.state;
@@ -45,6 +46,7 @@ export function App() {
   const [filter, setFilter] = React.useState('all');
   const [pauseLogs, setPauseLogs] = React.useState(false);
   const [disconnectDialog, setDisconnectDialog] = React.useState(false);
+  const [page, setPage] = React.useState<'serial' | 'ozone'>('serial');
   const logScroll = React.useRef<HTMLDivElement>(null);
   const engineRef = React.useRef<TransportManager | null>(null);
   const connectionRef = React.useRef(connection);
@@ -149,6 +151,11 @@ export function App() {
       <div className="brand"><span className="brand-mark"><Activity size={21} strokeWidth={1.6} /></span><div><strong>DMDebug Station</strong><span>三总线设备工作台</span></div><span className="version-tag mono">Protocol v2</span></div>
       <div className="header-actions"><span className="quiet-meta">9 个控制单元 / 12 台电机</span><button className="button danger" disabled={!ready || busy} onClick={() => { void command(Opcode.Disable, BROADCAST).catch(() => {}); }}><Square size={15} />全设备失能</button></div>
     </header>
+    <nav className="page-navigation" aria-label="功能页">
+      <button type="button" className={`button ${page === 'serial' ? 'primary' : 'subtle'}`} aria-current={page === 'serial' ? 'page' : undefined} onClick={() => setPage('serial')}>串口工作台</button>
+      <button type="button" className={`button ${page === 'ozone' ? 'primary' : 'subtle'}`} aria-current={page === 'ozone' ? 'page' : undefined} onClick={() => setPage('ozone')}>Ozone调参</button>
+    </nav>
+    <div hidden={page !== 'serial'}>
     <section className="connection-bar" aria-label="连接与通讯状态">
       <div className="connection-settings">
         <div className="connection-field"><label htmlFor="transport-mode">传输方式</label><select id="transport-mode" value={mode} disabled={connection.portOpen || busy} onChange={event => setMode(event.target.value as TransportMode)}>
@@ -197,6 +204,8 @@ export function App() {
         <footer className="workspace-footer"><span>64 B 定长帧 · CRC-16/CCITT-FALSE · 单请求停等</span><span>500 ms失联门禁 · 软件保护不替代硬件急停</span></footer>
       </main>
     </div>
+    </div>
+    {page === 'ozone' && <OzoneTuningPage />}
     {disconnectDialog && <div className="modal-backdrop" onClick={() => setDisconnectDialog(false)}><section className="modal disconnect-modal" role="dialog" aria-modal="true" aria-labelledby="disconnect-title" onClick={event => event.stopPropagation()}><div className="modal-heading"><ShieldAlert size={20} /><h2 id="disconnect-title">断开通讯不等于电机停止</h2></div><p>建议先发送“全设备失能”并核对新反馈，再隔离动力。失联门禁依赖主控与总线正常运行，不能作为硬件急停。</p><div className="modal-actions"><button ref={disconnectCancel} className="button" onClick={() => setDisconnectDialog(false)}>返回检查</button><button className="button danger" onClick={() => { setDisconnectDialog(false); void engineRef.current?.disconnect(); }}>仍然断开</button></div></section></div>}
   </div>;
 }

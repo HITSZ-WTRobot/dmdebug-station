@@ -1,3 +1,5 @@
+mod ozone;
+
 use serde::Serialize;
 use serialport::{DataBits, FlowControl, Parity, SerialPort, SerialPortType, StopBits};
 use std::io::{Read, Write};
@@ -228,12 +230,17 @@ fn write_serial_frame(state: State<'_, SerialState>, data: Vec<u8>) -> Result<()
 pub fn run() {
     tauri::Builder::default()
         .manage(SerialState::default())
+        .manage(ozone::OzoneState::default())
         .invoke_handler(tauri::generate_handler![
             get_platform_info,
             list_serial_ports,
             open_serial_port,
             close_serial_port,
-            write_serial_frame
+            write_serial_frame,
+            ozone::ozone_connect,
+            ozone::ozone_disconnect,
+            ozone::ozone_read_parameters,
+            ozone::ozone_write_parameter
         ])
         .run(tauri::generate_context!())
         .expect("error while running Motor Test Station Tauri application");
