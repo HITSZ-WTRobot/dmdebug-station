@@ -54,9 +54,7 @@ fn list_serial_ports() -> Result<Vec<SerialPortInfoDto>, String> {
 }
 
 fn input_diagnostics_mode() -> bool {
-    std::env::args().any(|argument| argument == "--input-diagnostics") ||
-        std::env::current_exe().ok().and_then(|path| path.file_stem().map(|name| name.to_string_lossy().into_owned()))
-            .is_some_and(|name| name.eq_ignore_ascii_case("GamepadInputCheck"))
+    std::env::args().any(|argument| argument == "--input-diagnostics")
 }
 
 #[tauri::command]

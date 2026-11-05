@@ -108,7 +108,7 @@ export function NativeGamepadPanel({ visible }: { visible: boolean }) {
         </div>
       </section>
       <section className="panel"><div className="panel-heading"><div><h2 className="panel-title">02 / 遥控阶段</h2><p>仅使能底盘 0x40，等待真实新反馈后才允许运动</p></div><span className={`state-label ${movingAllowed ? 'success' : 'warning'}`}><span className={`status-dot ${movingAllowed ? 'success' : 'warning'}`} />{PHASE_LABELS[snapshot.phase] ?? snapshot.phase}</span></div>
-        <div className="gamepad-content"><div className="gamepad-limits mono"><span>平移 ≤ 1 m/s</span><span>旋转 ≤ 10 deg/s</span><span>轮速 ≤ 160 rpm</span></div>
+        <div className="gamepad-content"><div className="gamepad-limits mono"><span>平移 ≤ {GAMEPAD_LIMITS.translation} m/s</span><span>旋转 ≤ {GAMEPAD_LIMITS.rotation} deg/s</span><span>轮速 ≤ {GAMEPAD_LIMITS.wheelRpm} rpm</span></div>
           <p className="gamepad-status" role="status">{snapshot.message}</p>
           <div className="gamepad-command mono"><span>调度目标 · 非发送确认</span><strong>vx {snapshot.target.vx.toFixed(3)} / vy {snapshot.target.vy.toFixed(3)} m/s / wz {snapshot.target.wz.toFixed(3)} deg/s</strong></div>
           <p className="muted">输入预览与调度目标不是实际发送记录，更不是电机反馈。实际发送请查看通信日志；电机状态请查看串口工作台的真实反馈。未开启时调度目标为零，回中只置零速、不失能。</p>

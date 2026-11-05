@@ -1,6 +1,6 @@
 import type { BodyVelocity } from './protocol';
 
-export const GAMEPAD_LIMITS = { translation: 1, rotation: 10, wheelRpm: 160 } as const;
+export const GAMEPAD_LIMITS = { translation: 0.4, rotation: 10, wheelRpm: 160 } as const;
 export const DEFAULT_DEADZONE = 0.12;
 export interface GamepadSample {
   id: string;
@@ -23,7 +23,7 @@ export function remapDeadzone(value: number, deadzone: number): number {
 export function translationTarget(x: number, y: number, deadzone: number): { vx: number; vy: number } {
   const magnitude = Math.hypot(x, y);
   if (magnitude <= deadzone) return { vx: 0, vy: 0 };
-  // 径向死区保持斜推方向，幅度线性重映射，合成速度绝不超过 1 m/s。
+  // 径向死区保持斜推方向，幅度线性重映射，合成速度不超过手柄平移上限。
   const speed = remapDeadzone(magnitude, deadzone) * GAMEPAD_LIMITS.translation;
   let vx = y === 0 ? 0 : -y / magnitude * speed;
   let vy = x === 0 ? 0 : -x / magnitude * speed;

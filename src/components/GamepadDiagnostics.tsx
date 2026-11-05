@@ -192,7 +192,7 @@ export function GamepadDiagnostics({ embedded = false }: { embedded?: boolean })
         <div className="readonly-summary"><strong>{status}</strong><span>连接设备 {connectedCount} · 显示轮询 100 ms</span><span>Rust 采集 / 日志独立运行</span></div>
       </div>
 
-      {!desktop && <div className="notice warning" role="status"><strong>Windows 原生诊断需要桌面版。</strong> 请打开 DMDebugStation.exe 的“输入诊断”，或独立只读 GamepadInputCheck.exe；浏览器不能调用 WinMM，不使用旧浏览器原始面板冒充此诊断。</div>}
+      {!desktop && <div className="notice warning" role="status"><strong>Windows 原生诊断需要桌面版。</strong> 请打开 DMDebugStation.exe 的“输入诊断”；浏览器不能调用 WinMM，不使用旧浏览器原始面板冒充此诊断。</div>}
       {pollError && <div className="notice danger" role="alert">无法取得诊断快照：{pollError}。下方若有数据，为最后一次收到的快照；不能据此确认当前采集与保存状态。</div>}
       {snapshot && (!snapshot.supported || snapshot.error) && <div className="notice danger" role="alert">{snapshot.error || '当前环境不支持原生 USB 手柄输入。'} 不会生成演示手柄；存在日志错误时不能确认记录完整保存。</div>}
       {actionError && <div className="notice danger" role="alert">操作未完成：{actionError}</div>}
