@@ -116,3 +116,21 @@ test('协议演示不分派 0x27，也不把直接内存写入伪装为串口成
     assert.equal(after.kp, before.kp); assert.equal(after.finish, before.finish);
   }
 });
+
+test('匹配PMAX125的演示接受正负200mm，拒绝235mm且保留原目标', () => {
+  for (const target of [200, -200]) {
+    const demo = new ProtocolDemo();
+    const enabled = decodeFrame(demo.handle(encodeRequest(1, Opcode.Enable, linear.id))[0]);
+    assert.equal(enabled.result, 0);
+    const rejected = decodeFrame(demo.handle(encodeRequest(2, Opcode.Move, linear.id, [235 * Math.sign(target)]))[0]);
+    assert.equal(rejected.result, 6);
+    const unchanged = decodeFrame(demo.handle(encodeRequest(3, Opcode.State, linear.id))[0]);
+    assert.equal(unchanged.type, 'motor-state');
+    if (unchanged.type === 'motor-state') assert.equal(unchanged.target, 0);
+    const accepted = decodeFrame(demo.handle(encodeRequest(4, Opcode.Move, linear.id, [target]))[0]);
+    assert.equal(accepted.result, 0);
+    const moving = decodeFrame(demo.handle(encodeRequest(5, Opcode.State, linear.id))[0]);
+    assert.equal(moving.type, 'motor-state');
+    if (moving.type === 'motor-state') { assert.equal(moving.target, target); assert.equal(moving.flags.busy, true); }
+  }
+});

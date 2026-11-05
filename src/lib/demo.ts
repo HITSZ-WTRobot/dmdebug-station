@@ -71,7 +71,7 @@ export class ProtocolDemo {
         } else if (opcode === Opcode.Move) {
           const target = view.getFloat32(12, true);
           if (!m.enabled) result = 3; else if (m.busy) result = 4;
-          else if (!Number.isFinite(target) || (m.definition.kind === 'linear' && Math.abs(target + m.origin) > 23.434) ||
+          else if (!Number.isFinite(target) || (m.definition.kind === 'linear' && Math.abs(target + m.origin) > 125 / 19.203 * 226.2 / (2 * Math.PI)) ||
             (m.definition.kind === 'joint' && (target < m.limits[0] || target > m.limits[1])) ||
             (m.definition.kind === 'm2006' && (target < 0 || target > 360))) result = 6;
           else { m.target = target; m.busy = true; m.complete = false; }

@@ -185,7 +185,7 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
           <p className="muted">{kind === 'linear' ? '无软件行程上下限；只接受有限且可编码的数值。' : `允许范围 ${format(lower)} … ${format(upper)} deg；不是增量，不取最短角。`}</p>
           <div className="actions"><button type="submit" className="button primary" disabled={!canMove || !targetValid}>发送位置目标</button></div>
         </form>
-        {kind === 'linear' && <p className="notice warning">226.2 mm/输出轴圈是换算比例，不是可用行程。当前协议原点附近仅约 ±23.434 mm 可编码；软件设零会移动原点，剩余正负行程未必对称。下位机拒绝不可编码目标，不截断。</p>}
+        {kind === 'linear' && <p className="notice warning">226.2 mm/输出轴圈是换算比例，不是可用行程。可编码范围由匹配的电机端/固件 PMAX 和当前软件零点决定；本版位置伸缩 PMAX=125 时协议原点附近约 ±234.34 mm。电机端须同步125，仍为12.5时禁止按新配置运动；下位机拒绝不可编码目标，不截断。</p>}
       </section>
       <section className="parameter-section" aria-labelledby={`${prefix}-zero-title`}>
         <h3 id={`${prefix}-zero-title`}>软件零点</h3>
