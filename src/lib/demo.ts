@@ -21,7 +21,7 @@ export class ProtocolDemo {
   }
   handle(request: Uint8Array): Uint8Array[] {
     const now = performance.now(), dt = Math.min((now - this.previousTime) / 1000, 1); this.previousTime = now;
-    if (now - this.lastRequest >= 500) { this.timeout = true; for (const m of this.devices.values()) { m.enabled = m.busy = false; m.fault = true; m.lastResult = 1; m.body = { vx: 0, vy: 0, wz: 0 }; } }
+    if (now - this.lastRequest >= 500) { this.timeout = true; for (const m of this.devices.values()) { m.enabled = m.busy = false; m.fault = true; m.lastResult = 107; m.body = { vx: 0, vy: 0, wz: 0 }; } }
     for (const m of this.devices.values()) {
       m.count = (m.count + Math.max(1, Math.round(dt * 500))) >>> 0;
       if (m.busy) { const distance = m.target - m.position; const speed = m.definition.kind === 'linear' ? m.limits[0] : m.definition.kind === 'm2006' ? 60 : m.limits[2];
