@@ -1,5 +1,7 @@
 # DMDebug Station · 三总线设备工作台
 
+组织仓库：[HITSZ-WTRobot/dmdebug-station](https://github.com/HITSZ-WTRobot/dmdebug-station)。项目概览、依赖和源码构建入口见[根目录README](../README.md)；配套下位机为[HITSZ-WTRobot/FDCAN_DM_TEST](https://github.com/HITSZ-WTRobot/FDCAN_DM_TEST)。
+
 桌面版和便携网页使用同一份 React/TypeScript 源码，统一适配下位机 `SERIAL_PROTOCOL.md` **v2**。浅色实验台界面，按 FDCAN 总线分组展示九个控制单元、十二台电机。不自动启动演示、不自动连接串口、不自动使能或恢复旧目标。
 
 ## 使用入口
@@ -92,7 +94,7 @@ npm run build:all
 
 - build:web执行TypeScript检查、Vite构建和便携网页导出。
 - build:all通过Tauri构建执行同一前端流程，再将当前release程序复制到根目录DMDebugStation.exe；不能只改源码后继续运行旧exe。
-- Git已在DMDBUG根目录初始化，无远端或云端推送。main已快进到现有v2工作台，串口修复在 `fix/serial-session-timeout` 独立提交；node_modules、dist、Rust target和exe等产物忽略，两个便携web入口随源码更新。不要只更新源码后继续使用旧exe或旧HTML。
+- Git保留现有基线、工作台与串口修复提交；首次发布以最新修复版初始化组织仓库 `HITSZ-WTRobot/dmdebug-station` 的main，并保留已有开发分支。后续从main创建功能/修复分支并通过PR合入，不强推或重写历史。node_modules、dist、Rust target和exe等产物忽略，两个便携web入口随源码更新。不要只更新源码后继续使用旧exe或旧HTML。
 - 业务接口/编解码在src/lib，状态契约在src/store，设备控制/遥测/日志行是独立组件。两种交付不再维护重复的v1协议逻辑。
 
 ## 本轮验证边界
