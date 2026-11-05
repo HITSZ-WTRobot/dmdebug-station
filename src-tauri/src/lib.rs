@@ -1,6 +1,7 @@
 mod ozone;
 mod native;
 mod gamepad;
+mod diagnostics;
 
 use serde::Serialize;
 use serialport::SerialPortType;
@@ -51,8 +52,21 @@ fn list_serial_ports() -> Result<Vec<SerialPortInfoDto>, String> {
     }).collect())
 }
 
+fn input_diagnostics_mode() -> bool {
+    std::env::args().any(|argument| argument == "--input-diagnostics") ||
+        std::env::current_exe().ok().and_then(|path| path.file_stem().map(|name| name.to_string_lossy().into_owned()))
+            .is_some_and(|name| name.eq_ignore_ascii_case("GamepadInputCheck"))
+}
+
+#[tauri::command]
+fn application_mode() -> &'static str {
+    "workbench"
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 诊断程序不注册通信或电机控制命令，也不启动它们的后台线程。
+    if input_diagnostics_mode() { diagnostics::run(); return; }
     tauri::Builder::default()
         .manage(native::NativeState::default())
         .manage(gamepad::NativeGamepadState::default())
@@ -72,6 +86,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            application_mode,
             get_platform_info,
             list_serial_ports,
             native::native_connect,
