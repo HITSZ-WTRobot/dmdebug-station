@@ -1,5 +1,6 @@
 //! 独立只读输入诊断，不使用电机控制运行时。
-use gilrs::{EventType, Gamepad, GilrsBuilder, MappingSource};
+#[cfg(windows)]
+mod winmm;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
@@ -20,6 +21,9 @@ pub struct DiagnosticAxis {
     pub code: u32,
     pub name: String,
     pub value: f32,
+    pub raw_value: u32,
+    pub minimum: u32,
+    pub maximum: u32,
 }
 
 #[derive(Clone, Serialize)]
@@ -29,6 +33,14 @@ pub struct DiagnosticButton {
     pub name: String,
     pub value: f32,
     pub pressed: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticHat {
+    pub code: u32,
+    pub name: String,
+    pub value: Option<u32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -44,6 +56,7 @@ pub struct DiagnosticDevice {
     pub connected: bool,
     pub axes: Vec<DiagnosticAxis>,
     pub buttons: Vec<DiagnosticButton>,
+    pub hats: Vec<DiagnosticHat>,
 }
 
 #[derive(Clone, Serialize)]
@@ -57,6 +70,7 @@ pub struct DiagnosticEvent {
     pub code: Option<u32>,
     pub name: String,
     pub value: Option<f32>,
+    pub raw_value: Option<u32>,
     pub stage: String,
     pub detail: String,
 }
@@ -123,6 +137,7 @@ impl Recorder {
             code: None,
             name: String::new(),
             value: None,
+            raw_value: None,
             stage: self.snapshot.stage.clone(),
             detail: String::new(),
         }
@@ -197,11 +212,11 @@ impl Recorder {
         self.emit(event, None, true, Some(serde_json::json!({
             "application": "GamepadInputCheck", "version": env!("CARGO_PKG_VERSION"),
             "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
-            "driver": "gilrs 0.11.2", "api": input_api(),
-            "defaultFilters": false, "forceFeedback": false, "pollIntervalMs": 20,
-            "values": "gilrs normalized values with original platform Code; not USB HID packets",
-            "timeMs": "UNIX epoch milliseconds; input events retain gilrs event timestamps",
-            "focus": "Windows WGI input requires this native window to be focused; focus is never forced",
+            "driver": "Windows WinMM", "api": input_api(),
+            "forceFeedback": false, "pollIntervalMs": POLL_INTERVAL.as_millis(),
+            "values": "Windows calibrated X/Y/Z/R/U/V integers and declared ranges; not USB HID packets; no gilrs mapping",
+            "timeMs": "UNIX epoch milliseconds at snapshot observation",
+            "focus": "Focus is recorded only; it does not gate WinMM sampling",
             "logPath": self.snapshot.log_path
         })));
         if !self.snapshot.error.is_empty() {
@@ -242,39 +257,62 @@ impl Recorder {
         self.emit(event, device, false, None);
     }
 
-    fn input(&mut self, index: usize, raw: RawInput, time: SystemTime) {
-        if let Some(&position) = self.active.get(&index) {
-            let device = &mut self.snapshot.devices[position];
-            if let (Some(code), Some(value)) = (raw.code, raw.value) {
-                if raw.kind == "AxisChanged" {
-                    match device.axes.iter_mut().find(|axis| axis.code == code) {
-                        Some(axis) => { axis.value = value; axis.name.clone_from(&raw.name); }
-                        None => {
-                            device.axes.push(DiagnosticAxis { code, name: raw.name.clone(), value });
-                            device.axes.sort_unstable_by_key(|axis| axis.code);
-                        }
-                    }
-                } else if let Some(pressed) = raw.pressed {
-                    match device.buttons.iter_mut().find(|button| button.code == code) {
-                        Some(button) => {
-                            button.value = value;
-                            button.pressed = pressed;
-                            button.name.clone_from(&raw.name);
-                        }
-                        None => {
-                            device.buttons.push(DiagnosticButton { code, name: raw.name.clone(), value, pressed });
-                            device.buttons.sort_unstable_by_key(|button| button.code);
-                        }
-                    }
-                }
-            }
+    fn observe(&mut self, frame: &DiagnosticDevice, time: SystemTime) {
+        let position = self.active.get(&frame.index).copied();
+        let same_layout = position.is_some_and(|position| {
+            let old = &self.snapshot.devices[position];
+            old.connected && old.name == frame.name && old.uuid == frame.uuid
+                && old.vendor_id == frame.vendor_id && old.product_id == frame.product_id
+                && old.mapping == frame.mapping && old.axes.len() == frame.axes.len()
+                && old.buttons.len() == frame.buttons.len() && old.hats.len() == frame.hats.len()
+                && old.axes.iter().zip(&frame.axes).all(|(a, b)|
+                    a.code == b.code && a.name == b.name && a.minimum == b.minimum && a.maximum == b.maximum)
+                && old.buttons.iter().zip(&frame.buttons).all(|(a, b)| a.code == b.code && a.name == b.name)
+                && old.hats.iter().zip(&frame.hats).all(|(a, b)| a.code == b.code && a.name == b.name)
+        });
+        if !same_layout {
+            self.connect(frame.clone(), time, "Windows 设备连接或能力/量程变化；保存完整当前基线".into());
+            return;
         }
-        let mut event = self.event(raw.kind, Some(index), time);
-        event.code = raw.code;
-        event.name = raw.name;
-        event.value = raw.value;
-        event.detail = raw.detail;
-        self.emit(event, None, false, None);
+        let position = position.expect("已匹配的设备必有活动位置");
+        for (axis_index, axis) in frame.axes.iter().enumerate() {
+            let old = &mut self.snapshot.devices[position].axes[axis_index];
+            if old.raw_value == axis.raw_value { continue; }
+            old.raw_value = axis.raw_value;
+            old.value = axis.value;
+            let mut event = self.event("AxisChanged", Some(frame.index), time);
+            event.code = Some(axis.code);
+            event.name.clone_from(&axis.name);
+            event.raw_value = Some(axis.raw_value);
+            event.value = Some(axis.value);
+            event.detail = format!("Windows 校准轴；声明范围 {}..{}；未反向、未自动端点校准", axis.minimum, axis.maximum);
+            self.emit(event, None, false, None);
+        }
+        for (button_index, button) in frame.buttons.iter().enumerate() {
+            let old = &mut self.snapshot.devices[position].buttons[button_index];
+            if old.pressed == button.pressed { continue; }
+            old.pressed = button.pressed;
+            old.value = button.value;
+            let mut event = self.event(if button.pressed { "ButtonPressed" } else { "ButtonReleased" }, Some(frame.index), time);
+            event.code = Some(button.code);
+            event.name.clone_from(&button.name);
+            event.raw_value = Some(u32::from(button.pressed));
+            event.value = Some(button.value);
+            event.detail = "Windows 物理按钮位图；不由模拟轴合成按钮".into();
+            self.emit(event, None, false, None);
+        }
+        for (hat_index, hat) in frame.hats.iter().enumerate() {
+            let old = &mut self.snapshot.devices[position].hats[hat_index];
+            if old.value == hat.value { continue; }
+            old.value = hat.value;
+            let mut event = self.event("PovChanged", Some(frame.index), time);
+            event.code = Some(hat.code);
+            event.name.clone_from(&hat.name);
+            event.raw_value = hat.value;
+            event.value = hat.value.map(|value| value as f32);
+            event.detail = "POV 百分之一度；null 表示居中；不合并到摇杆轴".into();
+            self.emit(event, None, false, None);
+        }
     }
 
     fn mark(&mut self, label: String) -> Result<(), String> {
@@ -320,96 +358,6 @@ impl Recorder {
     }
 }
 
-struct RawInput {
-    kind: &'static str,
-    code: Option<u32>,
-    name: String,
-    value: Option<f32>,
-    pressed: Option<bool>,
-    detail: String,
-}
-
-impl RawInput {
-    fn from_event(event: EventType, gamepad: &Gamepad<'_>) -> Self {
-        let mut raw = Self { kind: "Other", code: None, name: String::new(), value: None,
-            pressed: None, detail: format!("{event:?}") };
-        match event {
-            EventType::AxisChanged(axis, value, code) => {
-                raw.kind = "AxisChanged";
-                raw.code = Some(code.into_u32());
-                raw.name = format!("{axis:?}");
-                raw.value = Some(value);
-            }
-            EventType::ButtonPressed(button, code) | EventType::ButtonReleased(button, code)
-            | EventType::ButtonRepeated(button, code) | EventType::ButtonChanged(button, _, code) => {
-                raw.name = format!("{button:?}");
-                raw.code = Some(code.into_u32());
-                let cached = gamepad.state().button_data(code);
-                let (kind, value, pressed) = match event {
-                    EventType::ButtonPressed(_, _) => ("ButtonPressed", 1.0, true),
-                    EventType::ButtonReleased(_, _) => ("ButtonReleased", 0.0, false),
-                    EventType::ButtonRepeated(_, _) => ("ButtonRepeated", cached.map_or(1.0, |data| data.value()), true),
-                    EventType::ButtonChanged(_, value, _) => ("ButtonChanged", value,
-                        cached.map_or(value >= 0.75, |data| data.is_pressed())),
-                    _ => unreachable!(),
-                };
-                raw.kind = kind;
-                raw.value = Some(value);
-                raw.pressed = Some(pressed);
-            }
-            EventType::Dropped => raw.kind = "Dropped",
-            EventType::ForceFeedbackEffectCompleted => raw.kind = "ForceFeedbackEffectCompleted",
-            EventType::Connected => raw.kind = "Connected",
-            EventType::Disconnected => raw.kind = "Disconnected",
-            _ => {},
-        }
-        raw
-    }
-}
-
-struct DeviceIdentity {
-    uuid: [u8; 16],
-    name: String,
-    vendor_id: Option<u16>,
-    product_id: Option<u16>,
-    source: MappingSource,
-    map_name: String,
-}
-
-impl DeviceIdentity {
-    fn matches(&self, gamepad: &Gamepad<'_>) -> bool {
-        self.uuid == gamepad.uuid() && self.name == gamepad.os_name()
-            && self.vendor_id == gamepad.vendor_id() && self.product_id == gamepad.product_id()
-            && self.source == gamepad.mapping_source() && self.map_name == gamepad.map_name().unwrap_or_default()
-    }
-
-    fn read(gamepad: &Gamepad<'_>) -> Self {
-        Self { uuid: gamepad.uuid(), name: gamepad.os_name().into(), vendor_id: gamepad.vendor_id(),
-            product_id: gamepad.product_id(), source: gamepad.mapping_source(),
-            map_name: gamepad.map_name().unwrap_or_default().into() }
-    }
-
-    fn device(&self, index: usize, gamepad: &Gamepad<'_>) -> DiagnosticDevice {
-        let mut axes: Vec<_> = gamepad.state().axes().map(|(code, data)| DiagnosticAxis {
-            code: code.into_u32(), name: gamepad.axis_or_btn_name(code).map(|name| format!("{name:?}"))
-                .unwrap_or_else(|| "Unknown".into()), value: data.value(),
-        }).collect();
-        let mut buttons: Vec<_> = gamepad.state().buttons().map(|(code, data)| DiagnosticButton {
-            code: code.into_u32(), name: gamepad.axis_or_btn_name(code).map(|name| format!("{name:?}"))
-                .unwrap_or_else(|| "Unknown".into()), value: data.value(), pressed: data.is_pressed(),
-        }).collect();
-        axes.sort_unstable_by_key(|axis| axis.code);
-        buttons.sort_unstable_by_key(|button| button.code);
-        let mut uuid = String::with_capacity(32);
-        for byte in self.uuid {
-            use std::fmt::Write as _;
-            let _ = write!(&mut uuid, "{byte:02x}");
-        }
-        DiagnosticDevice { key: String::new(), index, name: self.name.clone(), uuid,
-            vendor_id: self.vendor_id, product_id: self.product_id,
-            mapping: format!("gilrs/{:?} {}", self.source, self.map_name), connected: true, axes, buttons }
-    }
-}
 
 #[derive(Clone)]
 pub struct DiagnosticState {
@@ -433,8 +381,8 @@ impl DiagnosticState {
         let mut event = recorder.event("Focus", None, SystemTime::now());
         event.name = "windowFocused".into();
         event.value = Some(if focused { 1.0 } else { 0.0 });
-        event.detail = if focused { "诊断窗口获得焦点；WGI 可在此窗口接收输入" }
-            else { "诊断窗口失去焦点；Windows WGI 可能暂停向本窗口提供输入，这不代表手柄模式改变" }.into();
+        event.detail = if focused { "诊断窗口获得焦点；焦点仅作日志标记" }
+            else { "诊断窗口失去焦点；WinMM 采集继续，不据此推断手柄模式" }.into();
         recorder.emit(event, None, true, None);
     }
 
@@ -454,28 +402,12 @@ impl DiagnosticState {
         }
     }
 
-    fn synchronize(&self, identities: &mut HashMap<usize, DeviceIdentity>, gamepad: &Gamepad<'_>,
-                   reconnect: bool, time: SystemTime, detail: &str) {
-        let index = usize::from(gamepad.id());
-        if !reconnect && identities.get(&index).is_some_and(|identity| identity.matches(gamepad)) {
-            return;
-        }
-        let identity = DeviceIdentity::read(gamepad);
-        let device = identity.device(index, gamepad);
-        self.lock().connect(device, time, detail.into());
-        identities.insert(index, identity);
-    }
-
+    #[cfg(windows)]
     fn read_inputs(&self) {
-        // 创建、输入读取和销毁都在同一个后台线程中完成。
-        // 不打开力反馈、控制状态、串口或其他应用程序。
-        let mut gilrs = match GilrsBuilder::new().with_default_filters(false).with_force_feedback(false).build() {
-            Ok(gilrs) => gilrs,
+        let mut reader = match winmm::Reader::new() {
+            Ok(reader) => reader,
             Err(error) => {
-                let mut recorder = self.lock();
-                recorder.snapshot.supported = !matches!(&error, gilrs::Error::NotImplemented(_));
-                recorder.snapshot.running = false;
-                recorder.error(format!("手柄输入驱动初始化失败（{}）：{error}", input_api()));
+                self.lock().error(format!("Windows 轴采集初始化失败：{error}"));
                 return;
             }
         };
@@ -483,41 +415,50 @@ impl DiagnosticState {
             let mut recorder = self.lock();
             recorder.snapshot.running = recorder.writer.is_some();
             let mut event = recorder.event("DriverReady", None, SystemTime::now());
-            event.detail = format!("{}；只读，默认滤波关闭，振动支持关闭", input_api());
+            event.detail = format!("{}；独立 Windows 轴/物理按钮/POV；不使用 gilrs 映射", input_api());
             recorder.emit(event, None, true, None);
         }
-        let mut identities = HashMap::new();
-        for (_, gamepad) in gilrs.gamepads() {
-            self.synchronize(&mut identities, &gamepad, false, SystemTime::now(), "启动时已连接的设备快照");
-        }
+        let mut previous_slot_count = 0;
         while !self.stop.load(Ordering::Relaxed) {
-            while let Some(event) = gilrs.next_event() {
-                let index = usize::from(event.id);
-                match event.event {
-                    EventType::Connected => self.synchronize(&mut identities, &gilrs.gamepad(event.id), true,
-                        event.time, "gilrs Connected"),
-                    EventType::Disconnected => {
-                        self.lock().disconnect(index, event.time, "gilrs Disconnected".into());
-                        identities.remove(&index);
+            let count = reader.slot_count();
+            for index in count..previous_slot_count {
+                let mut recorder = self.lock();
+                if recorder.active.get(&index).is_some_and(|&position| recorder.snapshot.devices[position].connected) {
+                    recorder.disconnect(index, SystemTime::now(), "Windows 驱动撤销设备槽位".into());
+                }
+            }
+            previous_slot_count = count;
+            for index in 0..count {
+                let time = SystemTime::now();
+                match reader.read(index) {
+                    Ok(Some(frame)) => self.lock().observe(frame, time),
+                    Ok(None) => {
+                        let mut recorder = self.lock();
+                        if recorder.active.get(&index).is_some_and(|&position| recorder.snapshot.devices[position].connected) {
+                            recorder.disconnect(index, time, "Windows 报告设备已断开".into());
+                        }
                     }
-                    _ => {
-                        let gamepad = gilrs.gamepad(event.id);
-                        self.synchronize(&mut identities, &gamepad, false, event.time, "输入事件前检测到设备身份或 mapping 改变");
-                        self.lock().input(index, RawInput::from_event(event.event, &gamepad), event.time);
+                    Err(error) => {
+                        let mut recorder = self.lock();
+                        recorder.snapshot.running = false;
+                        recorder.error(format!("Windows 设备 #{index} 采集失败：{error}"));
+                        return;
                     }
                 }
-                if self.stop.load(Ordering::Relaxed) { break; }
             }
-            for (_, gamepad) in gilrs.gamepads() {
-                self.synchronize(&mut identities, &gamepad, false, SystemTime::now(), "枚举检测到设备身份或 mapping 改变");
-            }
-            gilrs.inc();
             thread::sleep(POLL_INTERVAL);
         }
         let mut recorder = self.lock();
         recorder.snapshot.running = false;
         let event = recorder.event("SessionStopped", None, SystemTime::now());
         recorder.emit(event, None, true, None);
+    }
+
+    #[cfg(not(windows))]
+    fn read_inputs(&self) {
+        let mut recorder = self.lock();
+        recorder.snapshot.supported = false;
+        recorder.error("此独立轴诊断使用 Windows WinMM；当前平台不支持，不回退到标准手柄映射".into());
     }
 }
 
@@ -526,10 +467,7 @@ fn milliseconds(time: SystemTime) -> u64 {
 }
 
 fn input_api() -> &'static str {
-    if cfg!(target_os = "windows") { "gilrs / Windows Gaming Input (WGI)" }
-    else if cfg!(target_os = "linux") { "gilrs / Linux evdev" }
-    else if cfg!(target_os = "macos") { "gilrs / macOS IOKit" }
-    else { "gilrs / platform backend (may be unsupported)" }
+    "Windows WinMM / joyGetPosEx / independent calibrated axes"
 }
 
 #[tauri::command]
@@ -621,20 +559,18 @@ mod tests {
     }
 
     fn device(index: usize, mapping: &str) -> DiagnosticDevice {
-        DiagnosticDevice { key: String::new(), index, name: "USB test fixture".into(),
-            uuid: "00000000000000000000000000000001".into(), vendor_id: Some(0x1234),
-            product_id: Some(0x5678), mapping: mapping.into(), connected: true,
-            axes: Vec::new(), buttons: Vec::new() }
+        DiagnosticDevice { key: String::new(), index, name: "Windows test fixture".into(),
+            uuid: String::new(), vendor_id: None, product_id: None, mapping: mapping.into(), connected: true,
+            axes: ["X", "Y", "Z", "Z旋转"].into_iter().enumerate().map(|(code, name)| DiagnosticAxis {
+                code: code as u32, name: name.into(), value: 0.0, raw_value: 500, minimum: 0, maximum: 1000,
+            }).collect(),
+            buttons: (0..2).map(|code| DiagnosticButton { code, name: format!("按钮 {}", code + 1), value: 0.0, pressed: false }).collect(),
+            hats: vec![DiagnosticHat { code: 0, name: "POV".into(), value: None }] }
     }
 
-    fn axis(code: u32, value: f32) -> RawInput {
-        RawInput { kind: "AxisChanged", code: Some(code), name: "Unknown".into(),
-            value: Some(value), pressed: None, detail: "Unknown raw axis".into() }
-    }
-
-    fn button(code: u32, value: f32, pressed: bool) -> RawInput {
-        RawInput { kind: if pressed { "ButtonPressed" } else { "ButtonReleased" }, code: Some(code),
-            name: "Unknown".into(), value: Some(value), pressed: Some(pressed), detail: "Unknown raw button".into() }
+    fn move_axis(frame: &mut DiagnosticDevice, axis: usize, raw: u32) {
+        frame.axes[axis].raw_value = raw;
+        frame.axes[axis].value = raw as f32 / 500.0 - 1.0;
     }
 
     fn lines(recorder: &Recorder) -> Vec<serde_json::Value> {
@@ -643,92 +579,109 @@ mod tests {
     }
 
     #[test]
-    fn unknown_codes_and_zero_values_are_preserved_without_phantom_controls() {
+    fn axis_changes_never_mutate_other_axes_or_synthesize_buttons() {
         let directory = TempDirectory::new();
         let mut recorder = recorder(&directory);
-        recorder.connect(device(2, "gilrs/Driver"), UNIX_EPOCH, "fixture".into());
-        assert!(recorder.snapshot.devices[0].axes.is_empty());
-        assert!(recorder.snapshot.devices[0].buttons.is_empty());
-        recorder.input(2, axis(0xdead, 0.0), UNIX_EPOCH);
-        recorder.input(2, axis(0xbeef, 0.25), UNIX_EPOCH);
-        recorder.input(2, button(0xabcd, 1.0, true), UNIX_EPOCH);
-        recorder.input(2, button(0xabcd, 0.0, false), UNIX_EPOCH);
+        let mut frame = device(0, "Windows axes");
+        recorder.observe(&frame, UNIX_EPOCH);
+        move_axis(&mut frame, 0, 1000);
+        recorder.observe(&frame, UNIX_EPOCH);
         let pad = &recorder.snapshot.devices[0];
-        assert_eq!(pad.axes.len(), 2);
-        assert_eq!(pad.axes.iter().find(|axis| axis.code == 0xdead).unwrap().value, 0.0);
-        assert_eq!(pad.buttons[0].name, "Unknown");
-        assert_eq!(pad.buttons[0].code, 0xabcd);
-        assert!(!pad.buttons[0].pressed);
-        assert_eq!(lines(&recorder).last().unwrap()["code"], 0xabcd);
+        assert_eq!(pad.axes[0].raw_value, 1000);
+        assert_eq!(pad.axes[2].raw_value, 500);
+        assert_eq!(pad.axes[3].raw_value, 500);
+        assert!(pad.buttons.iter().all(|button| !button.pressed));
+        move_axis(&mut frame, 3, 0);
+        frame.hats[0].value = Some(9000);
+        recorder.observe(&frame, UNIX_EPOCH);
+        assert_eq!(recorder.snapshot.devices[0].axes[2].raw_value, 500);
+        assert_eq!(recorder.snapshot.devices[0].axes[3].value, -1.0);
+        let saved = lines(&recorder);
+        let axes: Vec<_> = saved.iter().filter(|event| event["kind"] == "AxisChanged").collect();
+        assert_eq!(axes.len(), 2);
+        assert_eq!(axes[1]["name"], "Z旋转");
+        assert_eq!(axes[1]["rawValue"], 0);
+        assert!(!saved.iter().any(|event| event["kind"] == "ButtonPressed"));
+        assert_eq!(saved.last().unwrap()["kind"], "PovChanged");
+        assert_eq!(saved.last().unwrap()["rawValue"], 9000);
     }
 
     #[test]
-    fn reconnect_and_mapping_changes_keep_old_identity_and_events() {
+    fn reconnect_and_range_changes_keep_old_identity_and_history() {
         let directory = TempDirectory::new();
         let mut recorder = recorder(&directory);
-        recorder.connect(device(0, "first"), UNIX_EPOCH, "first connection".into());
+        let mut frame = device(0, "Windows axes");
+        recorder.observe(&frame, UNIX_EPOCH);
         let first_key = recorder.snapshot.devices[0].key.clone();
-        recorder.input(0, axis(91, 0.5), UNIX_EPOCH);
+        move_axis(&mut frame, 2, 800);
+        recorder.observe(&frame, UNIX_EPOCH);
         recorder.disconnect(0, UNIX_EPOCH, "unplugged".into());
-        recorder.connect(device(0, "first"), UNIX_EPOCH, "replugged".into());
-        recorder.connect(device(0, "changed mapping"), UNIX_EPOCH, "mapping changed".into());
+        recorder.observe(&frame, UNIX_EPOCH);
+        frame.axes[2].maximum = 1200;
+        recorder.observe(&frame, UNIX_EPOCH);
         assert_eq!(recorder.snapshot.devices.len(), 3);
         assert_ne!(recorder.snapshot.devices[1].key, first_key);
         assert_ne!(recorder.snapshot.devices[2].key, recorder.snapshot.devices[1].key);
         assert!(!recorder.snapshot.devices[0].connected);
         assert!(!recorder.snapshot.devices[1].connected);
         assert!(recorder.snapshot.devices[2].connected);
-        assert!(recorder.snapshot.events.iter().any(|event| event.device_key == first_key && event.code == Some(91)));
-        let saved = lines(&recorder);
-        let connection = saved.iter().find(|line| line["kind"] == "Connected").unwrap();
-        assert_eq!(connection["device"]["vendorId"], 0x1234);
-        assert_eq!(connection["device"]["productId"], 0x5678);
-        assert_eq!(connection["device"]["mapping"], "first");
+        assert!(recorder.snapshot.events.iter().any(|event| event.device_key == first_key && event.raw_value == Some(800)));
+        assert_eq!(recorder.snapshot.devices[0].axes[2].maximum, 1000);
+        assert_eq!(recorder.snapshot.devices[2].axes[2].maximum, 1200);
     }
 
     #[test]
     fn stages_and_pause_keep_live_values_without_recording_paused_input() {
         let directory = TempDirectory::new();
         let mut recorder = recorder(&directory);
-        recorder.connect(device(0, "fixture"), UNIX_EPOCH, String::new());
+        let mut frame = device(0, "Windows axes");
+        recorder.observe(&frame, UNIX_EPOCH);
         recorder.mark("准备按 Analog".into()).unwrap();
         recorder.pause(true).unwrap();
         let count = lines(&recorder).len();
         let sequence = recorder.snapshot.sequence;
-        recorder.input(0, axis(721, -0.8), UNIX_EPOCH);
-        recorder.input(0, button(722, 1.0, true), UNIX_EPOCH);
+        move_axis(&mut frame, 2, 100);
+        frame.buttons[0].pressed = true;
+        frame.buttons[0].value = 1.0;
+        frame.hats[0].value = Some(18000);
+        recorder.observe(&frame, UNIX_EPOCH);
         assert_eq!(recorder.snapshot.sequence, sequence);
         assert_eq!(lines(&recorder).len(), count);
-        assert_eq!(recorder.snapshot.devices[0].axes[0].value, -0.8);
+        assert_eq!(recorder.snapshot.devices[0].axes[2].raw_value, 100);
+        assert_eq!(recorder.snapshot.devices[0].hats[0].value, Some(18000));
         assert!(recorder.snapshot.devices[0].buttons[0].pressed);
         recorder.mark("Analog LED 由用户观察；未推断模式".into()).unwrap();
         assert_eq!(lines(&recorder).last().unwrap()["kind"], "Stage");
         recorder.pause(false).unwrap();
-        recorder.input(0, axis(721, 0.2), UNIX_EPOCH);
+        let saved = lines(&recorder);
+        let baseline = saved.iter().find(|event| event["kind"] == "DeviceSnapshot").unwrap();
+        assert_eq!(baseline["device"]["axes"][2]["rawValue"], 100);
+        assert_eq!(baseline["device"]["buttons"][0]["pressed"], true);
+        assert!(!saved.iter().any(|event| event["kind"] == "AxisChanged"));
+        move_axis(&mut frame, 2, 600);
+        recorder.observe(&frame, UNIX_EPOCH);
         assert_eq!(lines(&recorder).last().unwrap()["stage"], "Analog LED 由用户观察；未推断模式");
-        assert!(!lines(&recorder).iter().any(|line| line["kind"] == "AxisChanged" && line["value"] == -0.8));
     }
 
     #[test]
     fn jsonl_keeps_all_events_while_snapshot_only_keeps_two_hundred() {
         let directory = TempDirectory::new();
         let mut recorder = recorder(&directory);
-        recorder.connect(device(0, "fixture"), UNIX_EPOCH, String::new());
-        for number in 0..350 {
-            recorder.input(0, axis(44, number as f32 / 350.0), UNIX_EPOCH + Duration::from_millis(number));
+        let mut frame = device(0, "Windows axes");
+        recorder.observe(&frame, UNIX_EPOCH);
+        for number in 1..=350 {
+            move_axis(&mut frame, 0, 500 + number);
+            recorder.observe(&frame, UNIX_EPOCH + Duration::from_millis(number as u64));
         }
         let saved = lines(&recorder);
         assert_eq!(saved.len(), 352);
-        assert_eq!(saved[0]["kind"], "Session");
-        assert_eq!(saved[0]["session"]["defaultFilters"], false);
-        assert_eq!(saved[0]["session"]["forceFeedback"], false);
-        assert_eq!(saved[0]["session"]["logPath"], recorder.snapshot.log_path);
         assert_eq!(recorder.snapshot.events.len(), 200);
         for (index, line) in saved.iter().enumerate() {
             assert_eq!(line["sequence"].as_u64().unwrap(), index as u64 + 1);
         }
         assert!(PathBuf::from(&recorder.snapshot.log_path).is_absolute());
-        assert_eq!(saved.last().unwrap()["timeMs"], 349);
+        assert_eq!(saved.last().unwrap()["timeMs"], 350);
+        assert_eq!(saved.last().unwrap()["rawValue"], 850);
     }
 
     struct FailingWriter;
@@ -743,16 +696,19 @@ mod tests {
     fn write_failure_stops_claiming_to_save_but_retains_live_diagnostics() {
         let directory = TempDirectory::new();
         let mut recorder = recorder(&directory);
-        recorder.connect(device(0, "fixture"), UNIX_EPOCH, String::new());
+        let mut frame = device(0, "Windows axes");
+        recorder.observe(&frame, UNIX_EPOCH);
         recorder.writer = Some(Box::new(FailingWriter));
         recorder.snapshot.running = true;
-        recorder.input(0, axis(3, 0.25), UNIX_EPOCH);
+        move_axis(&mut frame, 2, 250);
+        recorder.observe(&frame, UNIX_EPOCH);
         assert!(recorder.writer.is_none());
         assert!(!recorder.snapshot.running);
         assert!(recorder.snapshot.error.contains("日志写入失败"));
         assert!(recorder.snapshot.events.iter().any(|event| event.kind == "Error"));
-        recorder.input(0, axis(3, 0.75), UNIX_EPOCH);
-        assert_eq!(recorder.snapshot.devices[0].axes[0].value, 0.75);
+        move_axis(&mut frame, 2, 750);
+        recorder.observe(&frame, UNIX_EPOCH);
+        assert_eq!(recorder.snapshot.devices[0].axes[2].raw_value, 750);
         assert!(recorder.mark("Select 单独对比".into()).is_err());
     }
 

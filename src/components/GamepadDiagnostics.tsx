@@ -2,6 +2,21 @@ import * as React from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { Copy, Download, Gamepad2, Pause, Play, ShieldCheck } from 'lucide-react';
 
+export interface DiagnosticAxis {
+  code: number;
+  name: string;
+  value: number;
+  rawValue: number;
+  minimum: number;
+  maximum: number;
+}
+
+export interface DiagnosticHat {
+  code: number;
+  name: string;
+  value: number | null;
+}
+
 export interface DiagnosticDevice {
   key: string;
   index: number;
@@ -11,8 +26,9 @@ export interface DiagnosticDevice {
   productId: number | null;
   mapping: string;
   connected: boolean;
-  axes: { code: number; name: string; value: number }[];
+  axes: DiagnosticAxis[];
   buttons: { code: number; name: string; value: number; pressed: boolean }[];
+  hats: DiagnosticHat[];
 }
 
 export interface DiagnosticEvent {
@@ -24,6 +40,7 @@ export interface DiagnosticEvent {
   code: number | null;
   name: string;
   value: number | null;
+  rawValue: number | null;
   stage: string;
   detail: string;
 }
@@ -43,7 +60,7 @@ export interface DiagnosticSnapshot {
 const STAGES = [
   { label: '普通模式逐项测试', action: '标记：普通模式', instruction: '逐个拨动左右摇杆，操作十字键、1～4、肩键、Select / Start，再按下摇杆。一次只操作一项。' },
   { label: '准备按Analog', action: '标记：准备按Analog', instruction: '先点标记，再按手柄上的物理 Analog 键。观察 LED，把颜色、亮灭等现象写入下方备注。' },
-  { label: 'Analog后重复测试', action: '标记：Analog后重复测试', instruction: '再次逐项操作相同的杆、十字键和按钮，对比原始 Code、数值、连接及 mapping 事件。' },
+  { label: 'Analog后重复测试', action: '标记：Analog后重复测试', instruction: '再次逐项操作相同的杆、十字键和按钮，对比 Windows 通道 Code、数值与连接事件。' },
   { label: '准备按Select', action: '标记：准备按Select', instruction: '单独测试 Select：先点标记，再按物理 Select，观察事件和 LED。不要同时按其他键。' },
   { label: 'Select后重复测试', action: '标记：Select后重复测试', instruction: '标记后重复相同输入；如有 LED 变化或没有任何上报，也用自定义标记记录。' },
 ];
@@ -62,22 +79,29 @@ function DeviceCard({ device }: { device: DiagnosticDevice }) {
       <dl className="readonly-identity">
         <div><dt>VID / PID</dt><dd className="mono">{usbId(device.vendorId)} / {usbId(device.productId)}</dd></div>
         <div><dt>UUID</dt><dd className="mono">{device.uuid || '未提供'}</dd></div>
-        <div><dt>Mapping</dt><dd className="mono">{device.mapping || '未提供'}</dd></div>
+        <div><dt>输入通道</dt><dd className="mono">{device.mapping || '未提供'}</dd></div>
       </dl>
-      <div className="readonly-raw-heading"><h4>原始轴</h4><span>{device.axes.length} 个已观察 Code</span></div>
-      {device.axes.length === 0 ? <p className="readonly-hint">尚未观察到轴数据；请逐个拨杆或操作十字键，不会补零生成轴。</p> :
+      <div className="readonly-raw-heading"><h4>Windows 校准轴</h4><span>{device.axes.length} 个设备支持通道 · 含未拨动轴</span></div>
+      {device.axes.length === 0 ? <p className="readonly-hint">设备未提供轴通道；不会补零生成轴。</p> :
         <div className="readonly-axes">{[...device.axes].sort((a, b) => a.code - b.code).map(axis => <div className="readonly-axis" key={axis.code}>
-          <div><strong>{axis.name || '未命名轴'}</strong><code>Code {rawCode(axis.code)}</code></div>
-          <meter min={-1} max={1} value={Math.max(-1, Math.min(1, axis.value))} aria-label={`${axis.name || '轴'}，Code ${axis.code}`} />
-          <output className="mono">{rawValue(axis.value)}</output>
+          <div><strong>{axis.name || '未命名轴'}</strong><code>Code {rawCode(axis.code)}</code><code>rawValue {rawValue(axis.rawValue)}</code><code>minimum..maximum {axis.minimum}..{axis.maximum}</code></div>
+          <meter min={-1} max={1} value={axis.value} aria-label={`${axis.name || '轴'}，Code ${axis.code}，归一化 value ${axis.value}`} />
+          <output className="mono">value {rawValue(axis.value)}</output>
         </div>)}</div>}
-      <div className="readonly-raw-heading"><h4>原始按钮</h4><span>{device.buttons.length} 个已观察 Code</span></div>
-      {device.buttons.length === 0 ? <p className="readonly-hint">尚未观察到按钮数据；Unknown 名称也会原样显示。</p> :
+      <div className="readonly-raw-heading"><h4>独立 POV / 十字键</h4><span>{device.hats.length} 个 POV 通道</span></div>
+      {device.hats.length === 0 ? <p className="readonly-hint">设备未提供 POV 通道；十字键也可能由其他轴或按钮通道上报。</p> :
+        <div className="readonly-buttons">{[...device.hats].sort((a, b) => a.code - b.code).map(hat => <div className="readonly-button" key={hat.code}>
+          <div><strong>{hat.name || '未命名 POV'}</strong></div>
+          <code>POV Code {rawCode(hat.code)}</code><output className="mono">{hat.value === null ? '居中（None）' : `${hat.value / 100}°`}</output>
+          <code>value {rawValue(hat.value)} · 单位 0.01°</code>
+        </div>)}</div>}
+      <div className="readonly-raw-heading"><h4>物理按钮</h4><span>{device.buttons.length} 个设备支持 Code</span></div>
+      {device.buttons.length === 0 ? <p className="readonly-hint">设备未提供物理按钮通道；未知名称也会原样显示。</p> :
         <div className="readonly-buttons">{[...device.buttons].sort((a, b) => a.code - b.code).map(button => <div className={`readonly-button${button.pressed ? ' is-pressed' : ''}`} key={button.code}>
           <div><span className={`status-dot ${button.pressed ? 'success' : ''}`} /><strong>{button.name || '未命名按钮'}</strong><span>{button.pressed ? '按下' : '释放'}</span></div>
           <code>Code {rawCode(button.code)}</code><output className="mono">value {rawValue(button.value)}</output>
         </div>)}</div>}
-      <p className="readonly-hint">名称为输入 API 报告值，不是物理键位结论。条形仅显示 −1～1 范围，右侧保留原始值；未做死区、反向或控制映射。</p>
+      <p className="readonly-hint">名称来自 WinMM 后端，不代表物理键位映射，可与 joy.cpl 对照观察。rawValue 是 Windows 校准后的整数通道值，不是 USB 报文；value 仅按设备提供的 minimum..maximum 归一化，不截断数值。条形仅显示 −1～1；无软件反向、死区、自动端点校准或控制映射。POV 独立于轴和按钮，value 为百分之一度，None 表示居中。</p>
     </div>
   </article>;
 }
@@ -159,12 +183,12 @@ export function GamepadDiagnostics() {
   return <div className="readonly-diagnostics">
     <header className="readonly-banner">
       <ShieldCheck size={24} aria-hidden="true" />
-      <div><strong>只读：不会打开串口，不发送电机命令</strong><span>先退出其他遥控软件并隔离机器人动力；其他程序可能同时响应同一手柄。这里仅观察 USB 输入并保存本地日志，不启动遥控、不修改映射、不连接 Ozone。</span></div>
+      <div><strong>只读：不会打开串口，不发送电机命令</strong><span>先退出其他遥控软件并隔离机器人动力；其他程序可能同时响应同一手柄。这里仅观察 Windows 输入通道并保存本地日志，不启动遥控、不修改映射、不连接 Ozone。</span></div>
       <span className="readonly-badge">READ ONLY</span>
     </header>
     <main className="readonly-page">
       <div className="selection-heading readonly-title">
-        <div><div className="eyebrow mono">USB INPUT / RUST · GILRS / RAW EVENT LOG</div><h1><Gamepad2 size={26} aria-hidden="true" />USB 手柄输入诊断</h1><p>亲自逐个拨杆、按键，对比 Analog / Select 前后的真实输入；界面不生成模拟数据。</p></div>
+        <div><div className="eyebrow mono">WINDOWS INPUT / RUST · WINMM / READ-ONLY LOG</div><h1><Gamepad2 size={26} aria-hidden="true" />USB 手柄输入诊断</h1><p>亲自逐个拨杆、按键，对比 Analog / Select 前后的 Windows 校准通道；可与 joy.cpl 对照，界面不生成模拟数据。</p></div>
         <div className="readonly-summary"><strong>{status}</strong><span>连接设备 {connectedCount} · 显示轮询 100 ms</span><span>Rust 采集 / 日志独立运行</span></div>
       </div>
 
@@ -196,33 +220,34 @@ export function GamepadDiagnostics() {
               <span className="readonly-step-number mono">{String(index + 1).padStart(2, '0')}</span>
               <div><button className="button" disabled={!canRecord || pending} onClick={() => { void perform(() => invoke('diagnostic_mark', { label: step.label }), `已写入阶段标记：${step.label}`); }}>{step.action}</button><p>{step.instruction}</p></div>
             </li>)}</ol>
-            <div className="notice warning">Analog 不一定改变 USB 模式，Select 也可能不单独上报。请根据真实日志比较，不根据键名、LED 或 mapping 名称直接判定模式。</div>
+            <div className="notice warning">Analog 不一定改变 USB 模式，Select 也可能不单独上报。请根据真实日志比较，不根据键名、LED 或通道名称直接判定模式。</div>
             <form className="readonly-mark-form" onSubmit={event => { void submitStage(event); }}>
               <label htmlFor="diagnostic-custom-stage">自定义标记 / LED 与操作备注</label>
               <input id="diagnostic-custom-stage" value={customStage} onChange={event => setCustomStage(event.target.value)} placeholder="例如：按 Analog 后红灯亮；Select 无可见事件" disabled={!canRecord || pending} />
               <button className="button primary" type="submit" disabled={!canRecord || pending || !customStage.trim()}>写入自定义标记</button>
             </form>
-            <p className="readonly-hint">Windows 原生输入可能依赖窗口焦点：测试时请手动点回本窗口。焦点变化由 Rust 记录；程序不会强制抢占其他窗口。</p>
+            <p className="readonly-hint">本诊断使用 WinMM 读取 Windows 校准通道，无需为采集保持窗口焦点。焦点变化仅作为日志上下文，不代表输入条件；程序不会强制抢占其他窗口。</p>
           </div>
         </section>
 
         <section className="readonly-devices" aria-labelledby="diagnostic-devices-title">
-          <div className="readonly-section-heading"><h2 id="diagnostic-devices-title">02 / 设备与原始输入</h2><span>真实 Code · 不隐藏 Unknown</span></div>
-          {!snapshot?.devices.length ? <div className="panel readonly-waiting"><Gamepad2 size={32} aria-hidden="true" /><strong>{!desktop ? '等待桌面原生诊断' : !snapshot ? '等待原生输入快照' : !snapshot.supported ? '原生输入不可用' : '等待连接 USB 手柄'}</strong><p>连接后逐个操作杆和按钮，设备与真实上报值会出现在这里。不会生成占位设备或假数据。</p></div> : snapshot.devices.map(device => <DeviceCard device={device} key={device.key} />)}
+          <div className="readonly-section-heading"><h2 id="diagnostic-devices-title">02 / 设备与 Windows 输入</h2><span>轴、物理按钮与 POV 分开显示</span></div>
+          {!snapshot?.devices.length ? <div className="panel readonly-waiting"><Gamepad2 size={32} aria-hidden="true" /><strong>{!desktop ? '等待桌面原生诊断' : !snapshot ? '等待原生输入快照' : !snapshot.supported ? '原生输入不可用' : '等待连接 USB 手柄'}</strong><p>连接后显示设备支持的通道和当前 Windows 读数，未拨动轴也会显示。不会生成占位设备或假数据。</p></div> : snapshot.devices.map(device => <DeviceCard device={device} key={device.key} />)}
         </section>
       </div>
 
       <section className="panel readonly-events" aria-labelledby="diagnostic-events-title">
-        <div className="panel-heading"><div><h2 id="diagnostic-events-title" className="panel-title">03 / 原始事件与连接变化</h2><p>最新在前 · 当前 {events.length} 条 / 最多 200 条 · 包含设备、阶段、焦点与错误事件；完整会话见 JSONL。</p></div>
+        <div className="panel-heading"><div><h2 id="diagnostic-events-title" className="panel-title">03 / 通道事件与连接变化</h2><p>最新在前 · 当前 {events.length} 条 / 最多 200 条 · 包含设备、阶段、焦点与错误事件；完整会话见 JSONL。轴 rawValue 是 Windows 校准整数，value 是归一化值；POV value 单位为 0.01°，空值（—）表示 None / 居中；不适用的 rawValue 为 —。</p></div>
           <button className="button" disabled={!events.length} onClick={downloadEvents}><Download size={15} aria-hidden="true" />下载当前事件 JSON</button>
         </div>
-        <div className="readonly-table-scroll" tabIndex={0} role="region" aria-label="原始事件表，可横向和纵向滚动">
-          <table className="readonly-event-table"><thead><tr><th scope="col">序号 / 时间 ms</th><th scope="col">设备</th><th scope="col">事件</th><th scope="col">Code / 名称</th><th scope="col">原始值</th><th scope="col">阶段 / 详情</th></tr></thead>
-            <tbody>{events.length === 0 ? <tr><td colSpan={6} className="readonly-table-empty">尚无真实事件。连接手柄或写入阶段标记后观察；这里不会显示模拟输入。</td></tr> : events.map(event => <tr key={event.sequence}>
+        <div className="readonly-table-scroll" tabIndex={0} role="region" aria-label="Windows 输入事件表，可横向和纵向滚动">
+          <table className="readonly-event-table"><thead><tr><th scope="col">序号 / 时间 ms</th><th scope="col">设备</th><th scope="col">事件</th><th scope="col">Code / 名称</th><th scope="col">rawValue</th><th scope="col">value</th><th scope="col">阶段 / 详情</th></tr></thead>
+            <tbody>{events.length === 0 ? <tr><td colSpan={7} className="readonly-table-empty">尚无真实事件。连接手柄或写入阶段标记后观察；这里不会显示模拟输入。</td></tr> : events.map(event => <tr key={event.sequence}>
               <td className="mono">#{event.sequence}<small>{event.timeMs}</small></td>
               <td>{event.index === null ? '会话 / 窗口' : `#${event.index}`}<small className="mono">{event.deviceKey || '—'}</small></td>
               <td className="mono">{event.kind}</td>
               <td><code>{event.code === null ? '—' : rawCode(event.code)}</code><small>{event.name || '—'}</small></td>
+              <td className="mono">{rawValue(event.rawValue)}</td>
               <td className="mono">{rawValue(event.value)}</td>
               <td><strong>{event.stage || '未标记阶段'}</strong><small>{event.detail || '—'}</small></td>
             </tr>)}</tbody>
