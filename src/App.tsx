@@ -8,6 +8,7 @@ import { DeviceControls } from './components/DeviceControls';
 import { TelemetryPanel } from './components/TelemetryPanel';
 import { CommunicationRow } from './components/CommunicationRow';
 import { OzoneTuningPage } from './components/OzoneTuningPage';
+import { GamepadPanel } from './components/GamepadPanel';
 
 function deviceStatus(device: DeviceSnapshot, now: number, sessionReady: boolean) {
   const state = device.state;
@@ -46,7 +47,8 @@ export function App() {
   const [filter, setFilter] = React.useState('all');
   const [pauseLogs, setPauseLogs] = React.useState(false);
   const [disconnectDialog, setDisconnectDialog] = React.useState(false);
-  const [page, setPage] = React.useState<'serial' | 'ozone'>('serial');
+  const [page, setPage] = React.useState<'serial' | 'ozone' | 'gamepad'>('serial');
+  const [gamepadTransport, setGamepadTransport] = React.useState<TransportManager | null>(null);
   const logScroll = React.useRef<HTMLDivElement>(null);
   const engineRef = React.useRef<TransportManager | null>(null);
   const connectionRef = React.useRef(connection);
@@ -74,6 +76,7 @@ export function App() {
       },
     });
     engineRef.current = engine;
+    setGamepadTransport(engine);
     getPlatformInfo().then(info => {
       if (!mounted) return; setPlatform(info);
       if (info.isTauri) listNativeSerialPorts().then(found => { if (mounted) { setPorts(found); setPortName(found[0]?.portName ?? ''); } }).catch(error => { if (mounted) setNotice({ tone: 'danger', message: String(error) }); });
@@ -149,17 +152,18 @@ export function App() {
   return <div className="workbench">
     <header className="app-header">
       <div className="brand"><span className="brand-mark"><Activity size={21} strokeWidth={1.6} /></span><div><strong>DMDebug Station</strong><span>三总线设备工作台</span></div><span className="version-tag mono">Protocol v2</span></div>
-      <div className="header-actions"><span className="quiet-meta">9 个控制单元 / 12 台电机</span><button className="button danger" disabled={!ready || busy} onClick={() => { void command(Opcode.Disable, BROADCAST).catch(() => {}); }}><Square size={15} />全设备失能</button></div>
+      <div className="header-actions"><span className="quiet-meta">9 个控制单元 / 12 台电机</span><button className="button danger" disabled={!ready} onClick={() => { void command(Opcode.Disable, BROADCAST).catch(() => {}); }}><Square size={15} />全设备失能</button></div>
     </header>
     <nav className="page-navigation" aria-label="功能页">
       <button type="button" className={`button ${page === 'serial' ? 'primary' : 'subtle'}`} aria-current={page === 'serial' ? 'page' : undefined} onClick={() => setPage('serial')}>串口工作台</button>
       <button type="button" className={`button ${page === 'ozone' ? 'primary' : 'subtle'}`} aria-current={page === 'ozone' ? 'page' : undefined} onClick={() => setPage('ozone')}>Ozone调参</button>
+      <button type="button" className={`button ${page === 'gamepad' ? 'primary' : 'subtle'}`} aria-current={page === 'gamepad' ? 'page' : undefined} onClick={() => setPage('gamepad')}>手柄遥控</button>
     </nav>
     <div hidden={page !== 'serial'}>
     <section className="connection-bar" aria-label="连接与通讯状态">
       <div className="connection-settings">
         <div className="connection-field"><label htmlFor="transport-mode">传输方式</label><select id="transport-mode" value={mode} disabled={connection.portOpen || busy} onChange={event => setMode(event.target.value as TransportMode)}>
-          {platform?.isTauri && <option value="tauri">桌面原生串口</option>}<option value="web-serial">浏览器串口</option><option value="demo">协议演示 · 无硬件</option>
+          {platform?.isTauri ? <option value="tauri">桌面原生串口 · Rust后端</option> : <option value="web-serial">浏览器串口</option>}<option value="demo">协议演示 · 无硬件</option>
         </select></div>
         {mode === 'tauri' ? <div className="connection-field port-field"><label htmlFor="serial-port">系统串口</label><div className="inline-field"><select id="serial-port" value={portName} disabled={phaseBusy || ready} onChange={event => setPortName(event.target.value)}>{!ports.length && <option value="">未检测到端口</option>}{ports.map(port => <option key={port.portName} value={port.portName}>{port.label}</option>)}</select><button className="button subtle small" title="重新枚举串口" aria-label="重新枚举串口" disabled={phaseBusy || ready} onClick={() => { void listNativeSerialPorts().then(found => { setPorts(found); if (!found.some(p => p.portName === portName)) setPortName(found[0]?.portName ?? ''); }).catch(error => setNotice({ tone: 'danger', message: String(error) })); }}><RefreshCw size={15} /></button></div></div>
           : <div className="port-hint"><Cable size={17} /><span>{mode === 'demo' ? '独立演示会话，不访问串口' : '连接时由浏览器选择授权端口'}</span></div>}
@@ -206,6 +210,7 @@ export function App() {
     </div>
     </div>
     {page === 'ozone' && <OzoneTuningPage />}
+    <GamepadPanel transport={gamepadTransport} visible={page === 'gamepad'} />
     {disconnectDialog && <div className="modal-backdrop" onClick={() => setDisconnectDialog(false)}><section className="modal disconnect-modal" role="dialog" aria-modal="true" aria-labelledby="disconnect-title" onClick={event => event.stopPropagation()}><div className="modal-heading"><ShieldAlert size={20} /><h2 id="disconnect-title">断开通讯不等于电机停止</h2></div><p>建议先发送“全设备失能”并核对新反馈，再隔离动力。失联门禁依赖主控与总线正常运行，不能作为硬件急停。</p><div className="modal-actions"><button ref={disconnectCancel} className="button" onClick={() => setDisconnectDialog(false)}>返回检查</button><button className="button danger" onClick={() => { setDisconnectDialog(false); void engineRef.current?.disconnect(); }}>仍然断开</button></div></section></div>}
   </div>;
 }

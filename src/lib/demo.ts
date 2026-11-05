@@ -77,7 +77,7 @@ export class ProtocolDemo {
           else { m.target = target; m.busy = true; m.complete = false; }
         } else if (opcode === Opcode.BodyVelocity && m.definition.kind === 'chassis') {
           const body = { vx: view.getFloat32(12, true), vy: view.getFloat32(16, true), wz: view.getFloat32(20, true) };
-          if (!m.enabled) result = 3; else if (Math.abs(body.vx) > 0.100001 || Math.abs(body.vy) > 0.100001 || Math.abs(body.wz) > 10 || Object.values(body).some(n => !Number.isFinite(n))) result = 6; else m.body = body;
+          if (!m.enabled) result = 3; else if (Math.abs(body.vx) > 1 || Math.abs(body.vy) > 1 || Math.hypot(body.vx, body.vy) > 1.000001 || Math.abs(body.wz) > 10 || Object.values(body).some(n => !Number.isFinite(n))) result = 6; else m.body = body;
         } else if (opcode === Opcode.SetLimits) {
           const values = Array.from({ length: m.definition.kind === 'linear' ? 3 : 5 }, (_, i) => view.getFloat32(12 + i * 4, true));
           if (m.enabled) result = 4;
@@ -108,7 +108,7 @@ export class ProtocolDemo {
     return this.response(request, d.id, 0, d.kind === 'm2006' ? 50 : d.kind === 'chassis' ? 30 : 48, (v, b) => {
       let values: number[], offset: number;
       if (d.kind === 'm2006') { values = [9, .1, 0, 8000, 5, 4000, 400, 1800, 1200, 3000, .5, .1]; offset = 14; }
-      else if (d.kind === 'chassis') { values = [.1, .1, 10, 30, 63.5, 435, 435]; offset = 14; }
+      else if (d.kind === 'chassis') { values = [1, 1, 10, 160, 63.5, 435, 435]; offset = 14; }
       else { v.setUint16(14, d.kind === 'linear' ? 1 : 3, true); b[16] = d.wireKind; b[17] = d.kind === 'linear' ? 2 : 1; b[18] = 1;
         values = [...(d.kind === 'linear' ? [NaN, NaN, ...m.limits] : m.limits), 5, .5, 0, d.kind === 'linear' ? .1885 : .3, d.kind === 'linear' ? 1.1 : .1]; offset = 20; }
       values.forEach((n, i) => v.setFloat32(offset + i * 4, n, true));
