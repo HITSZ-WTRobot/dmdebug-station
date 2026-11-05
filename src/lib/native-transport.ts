@@ -2,7 +2,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { decodeFrame, type BodyVelocity, type Response } from './protocol';
 import type { ConnectionState, LogLevel, TransportMode } from '../store/atoms';
-import type { GamepadBinding } from './gamepad';
 import type { GamepadControlState, TransportCallbacks } from './transport';
 
 export interface NativePadView {
@@ -12,8 +11,8 @@ export interface NativePadView {
 }
 export interface NativePadSnapshot {
   supported: boolean; error: string; pads: NativePadView[]; selectedKey: string;
-  binding: GamepadBinding | null; armed: boolean; neutral: boolean; released: boolean;
-  target: BodyVelocity; phase: string; message: string;
+  armed: boolean; neutral: boolean; released: boolean; startPressed: boolean;
+  inputTarget: BodyVelocity; target: BodyVelocity; phase: string; message: string;
 }
 export interface NativeStatus extends Omit<ConnectionState, 'info' | 'mode'> {
   infoFrame: number[] | null; mode: 'tauri' | 'demo';

@@ -1,6 +1,9 @@
 //! 独立只读输入诊断，不使用电机控制运行时。
+use crate::input::InputDevice;
+#[cfg(test)]
+use crate::input::{InputAxis, InputButton, InputHat};
 #[cfg(windows)]
-mod winmm;
+use crate::input::winmm;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
@@ -15,49 +18,6 @@ use tauri::{Manager, State};
 const RECENT_EVENTS: usize = 200;
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiagnosticAxis {
-    pub code: u32,
-    pub name: String,
-    pub value: f32,
-    pub raw_value: u32,
-    pub minimum: u32,
-    pub maximum: u32,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiagnosticButton {
-    pub code: u32,
-    pub name: String,
-    pub value: f32,
-    pub pressed: bool,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiagnosticHat {
-    pub code: u32,
-    pub name: String,
-    pub value: Option<u32>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiagnosticDevice {
-    pub key: String,
-    pub index: usize,
-    pub name: String,
-    pub uuid: String,
-    pub vendor_id: Option<u16>,
-    pub product_id: Option<u16>,
-    pub mapping: String,
-    pub connected: bool,
-    pub axes: Vec<DiagnosticAxis>,
-    pub buttons: Vec<DiagnosticButton>,
-    pub hats: Vec<DiagnosticHat>,
-}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,7 +45,7 @@ pub struct DiagnosticSnapshot {
     pub log_path: String,
     pub stage: String,
     pub sequence: u64,
-    pub devices: Vec<DiagnosticDevice>,
+    pub devices: Vec<InputDevice>,
     pub events: VecDeque<DiagnosticEvent>,
 }
 
@@ -94,7 +54,7 @@ struct LogLine<'a> {
     #[serde(flatten)]
     event: &'a DiagnosticEvent,
     #[serde(skip_serializing_if = "Option::is_none")]
-    device: Option<&'a DiagnosticDevice>,
+    device: Option<&'a InputDevice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session: Option<serde_json::Value>,
 }
@@ -153,7 +113,7 @@ impl Recorder {
         event
     }
 
-    fn emit(&mut self, event: DiagnosticEvent, device: Option<DiagnosticDevice>, force: bool,
+    fn emit(&mut self, event: DiagnosticEvent, device: Option<InputDevice>, force: bool,
             session: Option<serde_json::Value>) {
         if self.snapshot.paused && !force {
             return;
@@ -208,9 +168,9 @@ impl Recorder {
             Err(error) => self.add_error(error),
         }
         let mut event = self.event("Session", None, SystemTime::now());
-        event.detail = "只读 USB 输入诊断；不打开串口、不连接 Ozone、不启动控制线程、不发送电机或振动命令。名称和 mapping 不能证明 Analog/Select 模式；用人工阶段对比。".into();
+        event.detail = "Windows 输入记录器本身不打开串口、不连接 Ozone、不发送电机或振动命令；工作台控制功能由其他模块管理。名称和 mapping 不能证明 Analog/Select 模式；用人工阶段对比。".into();
         self.emit(event, None, true, Some(serde_json::json!({
-            "application": "GamepadInputCheck", "version": env!("CARGO_PKG_VERSION"),
+            "application": "DMDebug input diagnostics", "version": env!("CARGO_PKG_VERSION"),
             "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
             "driver": "Windows WinMM", "api": input_api(),
             "forceFeedback": false, "pollIntervalMs": POLL_INTERVAL.as_millis(),
@@ -226,7 +186,7 @@ impl Recorder {
         }
     }
 
-    fn connect(&mut self, mut device: DiagnosticDevice, time: SystemTime, detail: String) {
+    fn connect(&mut self, mut device: InputDevice, time: SystemTime, detail: String) {
         if let Some(&position) = self.active.get(&device.index) {
             if self.snapshot.devices[position].connected {
                 self.disconnect(device.index, time, "设备身份或 mapping 改变，保留旧连接快照".into());
@@ -257,11 +217,11 @@ impl Recorder {
         self.emit(event, device, false, None);
     }
 
-    fn observe(&mut self, frame: &DiagnosticDevice, time: SystemTime) {
+    fn observe(&mut self, frame: &InputDevice, time: SystemTime) {
         let position = self.active.get(&frame.index).copied();
         let same_layout = position.is_some_and(|position| {
             let old = &self.snapshot.devices[position];
-            old.connected && old.name == frame.name && old.uuid == frame.uuid
+            old.connected && old.generation == frame.generation && old.name == frame.name && old.uuid == frame.uuid
                 && old.vendor_id == frame.vendor_id && old.product_id == frame.product_id
                 && old.mapping == frame.mapping && old.axes.len() == frame.axes.len()
                 && old.buttons.len() == frame.buttons.len() && old.hats.len() == frame.hats.len()
@@ -386,7 +346,11 @@ impl DiagnosticState {
         recorder.emit(event, None, true, None);
     }
 
-    fn start(&self, directory: Result<PathBuf, String>) {
+    pub(crate) fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn start(&self, directory: Result<PathBuf, String>) {
         self.lock().initialize(directory);
         let state = self.clone();
         if let Err(error) = thread::Builder::new().name("usb-input-diagnostics".into()).spawn(move || {
@@ -492,7 +456,7 @@ fn application_mode() -> &'static str { "input-diagnostics" }
 pub fn run() {
     let mut context = tauri::generate_context!();
     for window in &mut context.config_mut().app.windows {
-        // 启动时不抢占其他应用焦点；用户准备好后自行点回窗口采样 WGI 输入。
+        // 启动时不抢占其他应用焦点；由用户自行切到诊断窗口。
         window.focus = false;
         // 独立缓存避免与正在运行的工作台共享 WebView2 配置和调试参数。
         window.data_directory = Some(PathBuf::from("com.stm32.dmdebugstation.input-diagnostics"));
@@ -558,17 +522,17 @@ mod tests {
         recorder
     }
 
-    fn device(index: usize, mapping: &str) -> DiagnosticDevice {
-        DiagnosticDevice { key: String::new(), index, name: "Windows test fixture".into(),
+    fn device(index: usize, mapping: &str) -> InputDevice {
+        InputDevice { key: String::new(), index, generation: 1, name: "Windows test fixture".into(),
             uuid: String::new(), vendor_id: None, product_id: None, mapping: mapping.into(), connected: true,
-            axes: ["X", "Y", "Z", "Z旋转"].into_iter().enumerate().map(|(code, name)| DiagnosticAxis {
+            axes: ["X", "Y", "Z", "Z旋转"].into_iter().enumerate().map(|(code, name)| InputAxis {
                 code: code as u32, name: name.into(), value: 0.0, raw_value: 500, minimum: 0, maximum: 1000,
             }).collect(),
-            buttons: (0..2).map(|code| DiagnosticButton { code, name: format!("按钮 {}", code + 1), value: 0.0, pressed: false }).collect(),
-            hats: vec![DiagnosticHat { code: 0, name: "POV".into(), value: None }] }
+            buttons: (0..2).map(|code| InputButton { code, name: format!("按钮 {}", code + 1), value: 0.0, pressed: false }).collect(),
+            hats: vec![InputHat { code: 0, name: "POV".into(), value: None }] }
     }
 
-    fn move_axis(frame: &mut DiagnosticDevice, axis: usize, raw: u32) {
+    fn move_axis(frame: &mut InputDevice, axis: usize, raw: u32) {
         frame.axes[axis].raw_value = raw;
         frame.axes[axis].value = raw as f32 / 500.0 - 1.0;
     }

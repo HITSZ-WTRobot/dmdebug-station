@@ -2,6 +2,7 @@ mod ozone;
 mod native;
 mod gamepad;
 mod diagnostics;
+mod input;
 
 use serde::Serialize;
 use serialport::SerialPortType;
@@ -71,17 +72,26 @@ pub fn run() {
         .manage(native::NativeState::default())
         .manage(gamepad::NativeGamepadState::default())
         .manage(ozone::OzoneState::default())
+        .manage(diagnostics::DiagnosticState::default())
         .setup(|app| {
             let native = app.state::<native::NativeState>().inner().clone();
             native.start(app.handle().clone());
             app.state::<gamepad::NativeGamepadState>().start(app.handle().clone(), native);
+            app.state::<diagnostics::DiagnosticState>().start(app.path().app_log_dir()
+                .map_err(|error| format!("无法获取应用日志目录：{error}")));
             Ok(())
         })
         .on_window_event(|window, event| {
             // 操作系统焦点变化直接通知后端，不依赖页面定时器或前端事件是否及时执行。
             match event {
-                tauri::WindowEvent::Focused(focused) => window.state::<gamepad::NativeGamepadState>().set_window_focus(*focused),
-                tauri::WindowEvent::Destroyed => window.state::<gamepad::NativeGamepadState>().set_window_focus(false),
+                tauri::WindowEvent::Focused(focused) => {
+                    window.state::<gamepad::NativeGamepadState>().set_window_focus(*focused);
+                    window.state::<diagnostics::DiagnosticState>().record_focus(*focused);
+                }
+                tauri::WindowEvent::Destroyed => {
+                    window.state::<gamepad::NativeGamepadState>().set_window_focus(false);
+                    window.state::<diagnostics::DiagnosticState>().stop();
+                }
                 _ => {},
             }
         })
@@ -97,9 +107,12 @@ pub fn run() {
             native::native_query_parameters,
             native::native_command,
             gamepad::native_gamepad_snapshot,
-            gamepad::native_gamepad_configure,
+            gamepad::native_gamepad_select,
             gamepad::native_gamepad_context,
             gamepad::native_gamepad_stop,
+            diagnostics::diagnostic_snapshot,
+            diagnostics::diagnostic_mark,
+            diagnostics::diagnostic_pause,
             ozone::ozone_connect,
             ozone::ozone_disconnect,
             ozone::ozone_read_parameters,

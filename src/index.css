@@ -148,7 +148,7 @@ input[type=number] { font-family: var(--mono); font-variant-numeric: tabular-num
 .ozone-locations code { overflow-wrap: anywhere; color: var(--secondary); }
 @media (max-width: 900px) { .ozone-parameters { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 720px) { .ozone-page { padding: 16px; } .ozone-content { padding: 12px; } .page-navigation { padding: 10px 16px; } }
-/* 手柄遥控沿用实验台面板；原始输入与运动许可分区，避免把目标误认成反馈。 */
+/* 遥控页只展示三路输入预览，调度目标与真实反馈保持明确区分。 */
 .gamepad-page { max-width: 1520px; margin: 0 auto; padding: 24px; }
 .gamepad-page[hidden] { display: none; }
 .gamepad-page .selection-meta { overflow-wrap: anywhere; }
@@ -156,40 +156,27 @@ input[type=number] { font-family: var(--mono); font-variant-numeric: tabular-num
 .gamepad-content { padding: 16px 20px 20px; font-size: 11px; line-height: 19px; }
 .gamepad-content > .muted { font-size: 11px; line-height: 19px; margin: 12px 0; }
 .gamepad-content select { width: 100%; font-size: 12px; }
-.gamepad-bindings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
-.gamepad-binding { display: flex; align-items: center; gap: 12px; grid-column: 1 / -1; border-bottom: 1px solid var(--line-soft); }
-.gamepad-binding .field { flex: 1; }
-.gamepad-binding small { font-size: 10px; color: var(--secondary); }
-.gamepad-checkbox { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 11px; }
-.gamepad-checkbox input { width: 16px; height: 16px; min-height: 0; accent-color: var(--accent); }
+.gamepad-inputs { display: grid; gap: 18px; margin: 24px 0; }
+.gamepad-input { display: grid; grid-template-columns: 112px minmax(40px, 1fr) 110px; align-items: center; gap: 12px; }
+.gamepad-input > div { display: grid; gap: 2px; }
+.gamepad-input strong { font-size: 13px; font-weight: 600; }
+.gamepad-input small { color: var(--secondary); font-size: 10px; }
+.gamepad-input meter { width: 100%; min-width: 0; height: 14px; accent-color: var(--accent); }
+.gamepad-input output { text-align: right; font-size: 15px; white-space: nowrap; }
+.gamepad-start { padding: 2px 8px; border: 1px solid var(--line); border-radius: 4px; }
+.gamepad-start.pressed { color: var(--success); background: #eaf3ed; border-color: #9cbfa9; }
+.gamepad-command { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 4px; overflow-wrap: anywhere; }
+.gamepad-command span { color: var(--secondary); font-size: 10px; }
+.gamepad-command strong { font-size: 12px; font-weight: 500; }
 .gamepad-limits { display: flex; flex-wrap: wrap; gap: 8px 20px; padding: 12px; color: var(--accent); background: #f5f8fb; border: 1px solid #dce5ed; border-radius: 5px; }
 .gamepad-checks { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 16px 0; color: var(--secondary); font-size: 10px; }
-.gamepad-targets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.gamepad-targets .readout strong { font-size: 21px; }
 .gamepad-status { padding-top: 12px; border-top: 1px solid var(--line-soft); min-height: 50px; }
 .gamepad-stop-results { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
 .gamepad-stop-results h3 { font-size: 12px; font-weight: 600; margin: 0 0 8px; }
 .gamepad-stop-results > div { display: flex; gap: 12px; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--line-soft); }
 .gamepad-stop-results strong { font-weight: 500; }
-.gamepad-raw { grid-column: 1 / -1; }
-.gamepad-device { padding: 16px; border: 1px solid var(--line); border-radius: 5px; margin-bottom: 12px; min-width: 0; }
-.gamepad-device:last-child { margin-bottom: 0; }
-.gamepad-device.selected { border-color: #9cb9cf; background: #f8fbfd; }
-.gamepad-device-heading { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
-.gamepad-device-heading strong { font-size: 12px; font-weight: 600; }
-.gamepad-device-heading > span { color: var(--secondary); font-size: 10px; }
-.gamepad-axis-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 24px; padding: 12px 0; }
-.gamepad-axis { display: flex; gap: 10px; align-items: center; min-width: 0; font-size: 10px; }
-.gamepad-axis > span, .gamepad-axis > output { flex-shrink: 0; }
-.gamepad-axis > output { min-width: 56px; text-align: right; }
-.gamepad-axis meter { width: 100%; min-width: 24px; height: 12px; accent-color: var(--accent); }
-.gamepad-button-values { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 8px; }
-.gamepad-button-values > div { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; background: var(--surface); font-size: 10px; }
-.gamepad-button-values output { text-align: right; }
-.gamepad-button-values small { grid-column: 1 / -1; font-size: 9px; color: var(--secondary); }
-.gamepad-button-values .pressed { background: #eaf3ed; border-color: #9cbfa9; color: var(--success); }
-@media (max-width: 1050px) { .gamepad-layout { grid-template-columns: minmax(0, 1fr); }.gamepad-axis-values { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 720px) { .gamepad-page { padding: 16px; }.gamepad-content { padding: 12px; }.gamepad-layout { gap: 16px; }.gamepad-targets { grid-template-columns: minmax(0, 1fr); }.gamepad-axis-values { grid-template-columns: minmax(0, 1fr); }.page-navigation { flex-wrap: wrap; } }
+@media (max-width: 1050px) { .gamepad-layout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 720px) { .gamepad-page { padding: 16px; }.gamepad-content { padding: 12px; }.gamepad-layout { gap: 16px; }.gamepad-input { grid-template-columns: 90px minmax(24px, 1fr) 96px; gap: 8px; }.page-navigation { flex-wrap: wrap; } }
 
 /* 独立只读诊断页：沿用实验台色板，所有样式限制在 readonly 命名空间。 */
 .readonly-diagnostics { min-height: 100vh; background: var(--page); }

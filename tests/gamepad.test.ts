@@ -1,113 +1,174 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_DEADZONE, bindingError, gamepadIdentity, readGamepadInput, remapDeadzone, resetToggle, stepToggle, translationTarget, type GamepadBinding, type GamepadSample } from '../src/lib/gamepad';
+import { gamepadIdentity, readGamepadInput, resetToggle, stepToggle, type GamepadSample } from '../src/lib/gamepad';
 
-const binding: GamepadBinding = { leftX: 0, leftY: 1, rightX: 2, toggleButton: 0, invertLeftX: false, invertLeftY: false, invertRightX: false, deadzone: DEFAULT_DEADZONE };
-function pad(axes = [0, 0, 0], pressed = false): GamepadSample {
-  return { id: '非标准 USB 双摇杆', index: 1, mapping: '', connected: true, axes, buttons: [{ value: pressed ? 1 : 0, pressed }] };
+function pad(axes = [0, 0, 0, 0], pressed = false): GamepadSample {
+  return { id: 'Generic USB 双摇杆', index: 1, mapping: '', connected: true, axes,
+    buttons: Array.from({ length: 10 }, (_, index) => ({ value: index === 9 && pressed ? 1 : 0, pressed: index === 9 && pressed })) };
 }
 function close(actual: number, expected: number) {
   assert.ok(Math.abs(actual - expected) < 1e-10, `${actual} ≠ ${expected}`);
 }
+function input(sample: GamepadSample) {
+  const result = readGamepadInput(sample);
+  if (!result.valid) assert.fail(result.reason);
+  return result;
+}
+// 和浏览器消费者一样，以同一份输入同时驱动预览与 Start 门禁，不依赖真实等待。
+function controller() {
+  let state = resetToggle(gamepadIdentity(pad()));
+  return {
+    get armed() { return state.armed; },
+    get pressed() { return state.pressed; },
+    step(nowMs: number, sample = pad(), generation = 0) {
+      const result = readGamepadInput(sample);
+      const next = stepToggle(state, { identity: gamepadIdentity(sample, generation), nowMs,
+        valid: result.valid, neutral: result.valid && result.neutral, pressed: result.valid && result.pressed });
+      state = next.state;
+      return next.action;
+    },
+    reset() { state = resetToggle(gamepadIdentity(pad())); },
+  };
+}
+function armedController() {
+  const control = controller();
+  control.step(0); control.step(40);
+  control.step(50, pad(undefined, true));
+  assert.equal(control.step(90, pad(undefined, true)), 'start');
+  assert.equal(control.armed, true);
+  return control;
+}
 
-test('死区内零输出，死区外线性重映射；半程非满速，满程才到上限', () => {
-  for (const value of [0, 0.01, -0.1, 0.12, -0.12]) assert.equal(remapDeadzone(value, 0.12), 0);
-  close(remapDeadzone(0.5, 0.12), 0.38 / 0.88);
-  close(remapDeadzone(-0.5, 0.12), -0.38 / 0.88);
-  assert.equal(remapDeadzone(1, 0.12), 1);
-  assert.equal(remapDeadzone(-1, 0.12), -1);
-  assert.equal(remapDeadzone(2, 0.12), 1);
-  assert.equal(remapDeadzone(0.5, 0), 0.5);
-});
-
-test('平移径向死区保持方向，斜推合成不超过 1 m/s', () => {
-  assert.deepEqual(translationTarget(0.08, 0.08, 0.12), { vx: 0, vy: 0 });
-  const withinRadius = translationTarget(0.09, 0.09, 0.12);
-  assert.ok(Math.hypot(withinRadius.vx, withinRadius.vy) > 0);
-  const angled = translationTarget(0.3, -0.4, 0.12);
-  close(Math.hypot(angled.vx, angled.vy), (0.5 - 0.12) / 0.88);
-  close(angled.vx / angled.vy, -4 / 3);
-  const diagonal = translationTarget(1, -1, 0.12);
-  close(Math.hypot(diagonal.vx, diagonal.vy), 1);
+test('三控制轴固定方向、比例与限幅，输入预览不依赖许可', () => {
+  const forward = input(pad([0, -1, 0]));
+  assert.deepEqual(forward.target, { vx: 1, vy: 0, wz: 0 });
+  const right = input(pad([1, 0, 0.5]));
+  assert.equal(right.target.vy, -1);
+  close(right.target.wz, -10 * 0.38 / 0.88);
+  assert.equal(input(pad([0, 0, 1])).target.wz, -10);
+  assert.equal(input(pad([0, 0, -1])).target.wz, 10);
+  close(input(pad([0, -0.5, 0])).target.vx, 0.38 / 0.88);
+  const diagonal = input(pad([1, -1, 2])).target;
   close(diagonal.vx, Math.SQRT1_2);
   close(diagonal.vy, -Math.SQRT1_2);
-  for (const x of [-1, -0.5, 0, 0.5, 1]) for (const y of [-1, -0.5, 0, 0.5, 1]) {
-    const target = translationTarget(x, y, 0.12);
-    assert.ok(Math.hypot(target.vx, target.vy) <= 1 + 1e-12);
+  assert.equal(diagonal.wz, -10);
+  for (const x of [-1, -0.6, -0.5, 0, 0.5, 0.6, 1]) for (const y of [-1, -0.6, -0.5, 0, 0.5, 0.6, 1]) {
+    const target = input(pad([x, y, 0])).target;
+    assert.ok(Math.hypot(target.vx, target.vy) <= 1);
   }
 });
 
-test('方向为负 leftY 前进、正 leftX 右移、正 rightX 顺时针；旋转也按幅度缩放', () => {
-  const forward = readGamepadInput(pad([0, -1, 0]), binding);
-  assert.ok(forward.valid);
-  if (forward.valid) { assert.equal(forward.target.vx, 1); assert.equal(forward.target.vy, 0); assert.equal(forward.target.wz, 0); }
-  const right = readGamepadInput(pad([1, 0, 0.5]), binding);
-  assert.ok(right.valid);
-  if (right.valid) { assert.equal(right.target.vy, -1); close(right.target.wz, -10 * (0.5 - 0.12) / 0.88); }
-  const clockwise = readGamepadInput(pad([0, 0, 1]), binding);
-  assert.ok(clockwise.valid);
-  if (clockwise.valid) assert.equal(clockwise.target.wz, -10);
-  const inverted = readGamepadInput(pad([1, -1, 1]), { ...binding, invertLeftX: true, invertLeftY: true, invertRightX: true });
-  assert.ok(inverted.valid);
-  if (inverted.valid) { assert.ok(inverted.target.vx < 0); assert.ok(inverted.target.vy > 0); assert.equal(inverted.target.wz, 10); }
-});
-
-test('任意 mapping 支持显式轴/按钮绑定，缺轴、NaN、缺按钮或断开均无有效输入', () => {
-  const custom = { ...pad([0.6, 0, -1, 1]), buttons: [{ value: 0, pressed: false }, { value: 0.8, pressed: false }] };
-  const input = readGamepadInput(custom, { ...binding, leftX: 1, leftY: 2, rightX: 3, toggleButton: 1 });
-  assert.ok(input.valid);
-  if (input.valid) { assert.equal(input.target.vx, 1); assert.equal(input.target.wz, -10); assert.equal(input.pressed, true); }
-  for (const sample of [pad([0, 0]), pad([NaN, 0, 0]), pad([0, Infinity, 0]), { ...pad(), buttons: [] }, { ...pad(), connected: false }, { ...pad(), buttons: [{ value: NaN, pressed: false }] }]) assert.equal(readGamepadInput(sample, binding).valid, false);
-  for (const invalid of [{ ...binding, leftX: -1 }, { ...binding, leftY: 1.5 }, { ...binding, toggleButton: NaN }, { ...binding, deadzone: 0.5 }, { ...binding, deadzone: NaN }]) assert.notEqual(bindingError(invalid, pad()), null);
-});
-
-test('首次必须回中且释放后新上升沿；长按一次，关闭边沿无需回中', () => {
-  let state = resetToggle('device-a');
-  const step = (pressed: boolean, neutral: boolean) => {
-    const next = stepToggle(state, { identity: 'device-a', valid: true, neutral, pressed });
-    state = next.state;
-    return next.action;
-  };
-  assert.equal(step(true, true), null);
-  assert.equal(state.armed, false);
-  assert.equal(step(true, true), null);
-  assert.equal(step(false, false), null);
-  assert.equal(step(true, false), null);
-  assert.equal(state.armed, false);
-  assert.equal(step(true, true), null);
-  assert.equal(step(false, true), null);
-  assert.equal(step(true, true), 'start');
-  for (let index = 0; index < 20; index++) assert.equal(step(true, false), null);
-  assert.equal(state.armed, true);
-  assert.equal(step(false, false), null);
-  assert.equal(step(true, false), 'stop');
-  assert.equal(state.armed, false);
-  assert.equal(step(true, true), null);
-});
-
-test('回中只产生零目标，不撤销已经开启的 toggle', () => {
-  let state = stepToggle(resetToggle('a'), { identity: 'a', valid: true, neutral: true, pressed: false }).state;
-  state = stepToggle(state, { identity: 'a', valid: true, neutral: true, pressed: true }).state;
-  const next = stepToggle(state, { identity: 'a', valid: true, neutral: true, pressed: false });
-  assert.equal(next.state.armed, true);
-  assert.equal(next.action, null);
-  const input = readGamepadInput(pad(), binding);
-  assert.ok(input.valid);
-  if (input.valid) { assert.ok(input.neutral); close(input.target.vx, 0); close(input.target.vy, 0); close(input.target.wz, 0); }
-});
-
-test('身份变化、连接代次、无效输入及显式重置清除许可和旧释放边沿', () => {
-  const original = gamepadIdentity(pad());
-  for (const sample of [{ ...pad(), id: '另一个手柄' }, { ...pad(), index: 2 }, { ...pad(), mapping: 'standard' }, pad([0, 0, 0, 0]), { ...pad(), buttons: [] }]) assert.notEqual(gamepadIdentity(sample), original);
-  assert.notEqual(gamepadIdentity(pad(), 1), original);
-  let state = stepToggle(resetToggle(original), { identity: original, valid: true, neutral: true, pressed: false }).state;
-  state = stepToggle(state, { identity: original, valid: true, neutral: true, pressed: true }).state;
-  assert.equal(state.armed, true);
-  for (const input of [{ identity: 'replacement', valid: true, neutral: true, pressed: true }, { identity: original, valid: false, neutral: true, pressed: false }]) {
-    const invalidated = stepToggle(state, input);
-    assert.equal(invalidated.action, 'invalidated');
-    assert.deepEqual(invalidated.state, resetToggle());
-    assert.equal(stepToggle(invalidated.state, { identity: original, valid: true, neutral: true, pressed: true }).action, null);
+test('固定径向死区与三轴回中；右杆 Y、其他轴和其他按钮完全忽略', () => {
+  for (const rightY of [-1, 1, NaN, Infinity]) {
+    const sample = pad([0.08, 0.08, 0.12, rightY, NaN]);
+    sample.buttons[0] = { value: NaN, pressed: true };
+    sample.buttons[8] = { value: 1, pressed: true };
+    const result = input(sample);
+    assert.equal(result.neutral, true);
+    assert.equal(result.pressed, false);
+    assert.deepEqual(result.target, { vx: 0, vy: 0, wz: 0 });
   }
-  assert.equal(stepToggle(resetToggle(original), { identity: original, valid: true, neutral: true, pressed: true }).action, null);
+  assert.equal(input(pad([0.09, 0.09, 0, 1])).neutral, false);
+  assert.equal(input(pad([0, 0, 0.121, 0])).neutral, false);
+  const analogStart = pad();
+  analogStart.buttons[9] = { value: 0.5, pressed: false };
+  assert.equal(input(analogStart).pressed, true);
+  const digitalStart = pad();
+  digitalStart.buttons[9] = { value: 0, pressed: true };
+  assert.equal(input(digitalStart).pressed, true);
+});
+
+test('只拒绝缺失或非有限控制轴、Start 和断开的真实消费者输入', () => {
+  for (const sample of [pad([0, 0]), pad([NaN, 0, 0]), pad([0, Infinity, 0]), pad([0, 0, NaN]),
+    { ...pad(), buttons: pad().buttons.slice(0, 9) }, { ...pad(), connected: false }]) {
+    assert.equal(readGamepadInput(sample).valid, false);
+  }
+  const invalidStart = pad();
+  invalidStart.buttons[9] = { value: NaN, pressed: false };
+  assert.equal(readGamepadInput(invalidStart).valid, false);
+});
+
+test('Start 按下与释放分别连续稳定 40 ms，10～20 ms 抖动和长按不会重复切换', () => {
+  const control = controller();
+  control.step(0);
+  assert.equal(control.step(39), null);
+  control.step(40);
+  control.step(50, pad(undefined, true));
+  control.step(60);
+  control.step(70, pad(undefined, true));
+  control.step(89);
+  control.step(100, pad(undefined, true));
+  assert.equal(control.step(139, pad(undefined, true)), null);
+  assert.equal(control.pressed, false);
+  assert.equal(control.step(140, pad(undefined, true)), 'start');
+  assert.equal(control.step(2000, pad([1, 0, 0, 0], true)), null);
+  assert.equal(control.armed, true);
+  control.step(2010); control.step(2030, pad(undefined, true));
+  control.step(2050); control.step(2089);
+  assert.equal(control.pressed, true);
+  assert.equal(control.step(2090, pad(undefined, true)), null);
+  control.step(2100); control.step(2140);
+  assert.equal(control.pressed, false);
+  control.step(2150, pad([1, 0, 0, 0], true));
+  assert.equal(control.step(2190, pad([1, 0, 0, 0], true)), 'stop');
+  assert.equal(control.armed, false);
+});
+
+test('上电先观察稳定释放，新按下时必须三轴回中，持按回中不会开启', () => {
+  const control = controller();
+  control.step(0, pad(undefined, true));
+  assert.equal(control.step(40, pad(undefined, true)), null);
+  assert.equal(control.armed, false);
+  control.step(50, pad([1, 0, 0, 0])); control.step(90, pad([1, 0, 0, 0]));
+  control.step(100, pad([1, 0, 0, 0], true));
+  assert.equal(control.step(140, pad([1, 0, 0, 0], true)), null);
+  assert.equal(control.step(160, pad(undefined, true)), null);
+  assert.equal(control.armed, false);
+  control.step(170); control.step(210);
+  control.step(220, pad([0, 0, 0, 1], true));
+  assert.equal(control.step(260, pad([0, 0, 0, -1], true)), 'start');
+});
+
+test('回中仅产生零目标，再按关闭无需回中，停止后保留选择但必须重新稳定释放', () => {
+  const control = armedController();
+  assert.equal(control.step(100), null);
+  assert.equal(control.step(140), null);
+  assert.equal(control.armed, true);
+  assert.deepEqual(input(pad()).target, { vx: 0, vy: 0, wz: 0 });
+  control.step(150, pad([1, 0, 0, 0], true));
+  assert.equal(control.step(190, pad([1, 0, 0, 0], true)), 'stop');
+  assert.equal(control.step(200, pad(undefined, true)), null);
+  assert.equal(control.step(240, pad(undefined, true)), null);
+  assert.equal(control.armed, false);
+  control.step(250); control.step(290);
+  control.step(300, pad(undefined, true));
+  assert.equal(control.step(340, pad(undefined, true)), 'start');
+});
+
+test('同槽重连和无效输入撤销许可，旧释放与旧按下不能跨身份恢复', () => {
+  for (const replacement of [{ sample: pad(undefined, true), generation: 1 },
+    { sample: { ...pad(undefined, true), id: '新设备' }, generation: 0 },
+    { sample: { ...pad(), connected: false }, generation: 0 }]) {
+    const control = armedController();
+    assert.equal(control.step(100, replacement.sample, replacement.generation), 'invalidated');
+    assert.equal(control.armed, false);
+    assert.equal(control.step(110, pad(undefined, true)), null);
+    assert.equal(control.step(150, pad(undefined, true)), null);
+    assert.equal(control.armed, false);
+    control.step(160); control.step(200);
+    control.step(210, pad(undefined, true));
+    assert.equal(control.step(250, pad(undefined, true)), 'start');
+  }
+});
+
+test('失焦、离页或超时消费者重置后，恢复时持按不会继承旧许可', () => {
+  const control = armedController();
+  control.reset();
+  assert.equal(control.armed, false);
+  assert.equal(control.step(100, pad(undefined, true)), null);
+  assert.equal(control.step(140, pad(undefined, true)), null);
+  assert.equal(control.armed, false);
+  control.step(150); control.step(190);
+  control.step(200, pad(undefined, true));
+  assert.equal(control.step(240, pad(undefined, true)), 'start');
 });

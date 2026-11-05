@@ -1,5 +1,5 @@
-//! 只读 WinMM 诊断：保留 Windows 校准整数，不参与遥控映射或自行校准。
-use super::{DiagnosticAxis, DiagnosticButton, DiagnosticDevice, DiagnosticHat};
+//! 共享只读 WinMM 采集：保留 Windows 校准整数，不参与遥控映射或自行校准。
+use super::{InputAxis, InputButton, InputDevice, InputHat};
 use std::mem::size_of;
 use windows_sys::Win32::Media::{
     Multimedia::{
@@ -17,27 +17,31 @@ const READ_FLAGS: u32 = (JOY_RETURNX | JOY_RETURNY | JOY_RETURNZ | JOY_RETURNR
     | JOY_RETURNU | JOY_RETURNV | JOY_RETURNPOV | JOY_RETURNBUTTONS) as u32;
 const AXIS_NAMES: [&str; 6] = ["X", "Y", "Z", "Z旋转", "X旋转", "Y旋转"];
 
-pub(super) struct Reader {
+pub(crate) struct Reader {
     slots: Vec<Option<Slot>>,
+    generations: Vec<u64>,
 }
 
 impl Reader {
-    pub(super) fn new() -> Result<Self, String> {
+    pub(crate) fn new() -> Result<Self, String> {
         // 返回的是驱动可用槽位上限，不是已连接设备数；零表示没有可用槽位。
         let count = unsafe { joyGetNumDevs() } as usize;
         let mut slots = Vec::with_capacity(count);
         slots.resize_with(count, || None);
-        Ok(Self { slots })
+        Ok(Self { slots, generations: vec![0; count] })
     }
 
-    pub(super) fn slot_count(&mut self) -> usize {
+    pub(crate) fn slot_count(&mut self) -> usize {
         // 每轮只查询一次槽位上限，允许驱动热插拔，不在逐槽读取时重复查询。
         let count = unsafe { joyGetNumDevs() } as usize;
         self.slots.resize_with(count, || None);
+        if self.generations.len() < count {
+            self.generations.resize(count, 0);
+        }
         count
     }
 
-    pub(super) fn read(&mut self, index: usize) -> Result<Option<&DiagnosticDevice>, String> {
+    pub(crate) fn read(&mut self, index: usize) -> Result<Option<&InputDevice>, String> {
         let count = self.slots.len();
         if index >= count {
             return Err(format!("WinMM 槽位 {index} 超出当前槽位范围 0..{count}"));
@@ -66,7 +70,12 @@ impl Reader {
         if cached.as_ref().map_or(true, |slot| slot.capabilities != capabilities) {
             // 名称、能力、轴范围变化或重新连接时才重建集合；稳定轮询不分配或克隆。
             *cached = None;
-            *cached = Some(Slot::new(index, capabilities)?);
+            let generation = self.generations[index].wrapping_add(1);
+            let mut slot = Slot::new(index, capabilities)?;
+            slot.device.generation = generation;
+            slot.device.key = format!("winmm:{index}:{generation}");
+            self.generations[index] = generation;
+            *cached = Some(slot);
         }
         let slot = cached.as_mut().expect("成功读取能力后已建立槽位缓存");
         slot.update(&position);
@@ -135,7 +144,7 @@ impl Capabilities {
 
 struct Slot {
     capabilities: Capabilities,
-    device: DiagnosticDevice,
+    device: InputDevice,
 }
 
 impl Slot {
@@ -154,7 +163,7 @@ impl Slot {
         for (code, available) in present.iter().enumerate() {
             if *available {
                 let [minimum, maximum] = capabilities.ranges[code];
-                axes.push(DiagnosticAxis {
+                axes.push(InputAxis {
                     code: code as u32,
                     name: AXIS_NAMES[code].into(),
                     value: 0.0,
@@ -168,20 +177,21 @@ impl Slot {
         let button_count = capabilities.button_count.min(32);
         let mut buttons = Vec::with_capacity(button_count as usize);
         for code in 0..button_count {
-            buttons.push(DiagnosticButton {
+            buttons.push(InputButton {
                 code, name: format!("按钮 {}", code + 1), value: 0.0, pressed: false,
             });
         }
         let hats = if capabilities.flags & JOYCAPS_HASPOV != 0 {
-            vec![DiagnosticHat { code: 0, name: "POV".into(), value: None }]
+            vec![InputHat { code: 0, name: "POV".into(), value: None }]
         } else {
             Vec::new()
         };
         let name_end = capabilities.name.iter().position(|unit| *unit == 0)
             .unwrap_or(capabilities.name.len());
-        let device = DiagnosticDevice {
-            key: format!("winmm:{index}"),
+        let device = InputDevice {
+            key: String::new(),
             index,
+            generation: 0,
             name: String::from_utf16_lossy(&capabilities.name[..name_end]),
             uuid: String::new(),
             // wMid/wPid 是 WinMM 厂商/产品标识，不是 USB VID/PID。

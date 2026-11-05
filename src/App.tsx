@@ -9,6 +9,7 @@ import { TelemetryPanel } from './components/TelemetryPanel';
 import { CommunicationRow } from './components/CommunicationRow';
 import { OzoneTuningPage } from './components/OzoneTuningPage';
 import { GamepadPanel } from './components/GamepadPanel';
+import { GamepadDiagnostics } from './components/GamepadDiagnostics';
 
 function deviceStatus(device: DeviceSnapshot, now: number, sessionReady: boolean) {
   const state = device.state;
@@ -47,7 +48,7 @@ export function App() {
   const [filter, setFilter] = React.useState('all');
   const [pauseLogs, setPauseLogs] = React.useState(false);
   const [disconnectDialog, setDisconnectDialog] = React.useState(false);
-  const [page, setPage] = React.useState<'serial' | 'ozone' | 'gamepad'>('serial');
+  const [page, setPage] = React.useState<'serial' | 'ozone' | 'gamepad' | 'diagnostics'>('serial');
   const [gamepadTransport, setGamepadTransport] = React.useState<TransportManager | null>(null);
   const logScroll = React.useRef<HTMLDivElement>(null);
   const engineRef = React.useRef<TransportManager | null>(null);
@@ -158,6 +159,7 @@ export function App() {
       <button type="button" className={`button ${page === 'serial' ? 'primary' : 'subtle'}`} aria-current={page === 'serial' ? 'page' : undefined} onClick={() => setPage('serial')}>串口工作台</button>
       <button type="button" className={`button ${page === 'ozone' ? 'primary' : 'subtle'}`} aria-current={page === 'ozone' ? 'page' : undefined} onClick={() => setPage('ozone')}>Ozone调参</button>
       <button type="button" className={`button ${page === 'gamepad' ? 'primary' : 'subtle'}`} aria-current={page === 'gamepad' ? 'page' : undefined} onClick={() => setPage('gamepad')}>手柄遥控</button>
+      <button type="button" className={`button ${page === 'diagnostics' ? 'primary' : 'subtle'}`} aria-current={page === 'diagnostics' ? 'page' : undefined} onClick={() => setPage('diagnostics')}>输入诊断</button>
     </nav>
     <div hidden={page !== 'serial'}>
     <section className="connection-bar" aria-label="连接与通讯状态">
@@ -211,6 +213,7 @@ export function App() {
     </div>
     {page === 'ozone' && <OzoneTuningPage />}
     <GamepadPanel transport={gamepadTransport} visible={page === 'gamepad'} />
+    {page === 'diagnostics' && <GamepadDiagnostics embedded />}
     {disconnectDialog && <div className="modal-backdrop" onClick={() => setDisconnectDialog(false)}><section className="modal disconnect-modal" role="dialog" aria-modal="true" aria-labelledby="disconnect-title" onClick={event => event.stopPropagation()}><div className="modal-heading"><ShieldAlert size={20} /><h2 id="disconnect-title">断开通讯不等于电机停止</h2></div><p>建议先发送“全设备失能”并核对新反馈，再隔离动力。失联门禁依赖主控与总线正常运行，不能作为硬件急停。</p><div className="modal-actions"><button ref={disconnectCancel} className="button" onClick={() => setDisconnectDialog(false)}>返回检查</button><button className="button danger" onClick={() => { setDisconnectDialog(false); void engineRef.current?.disconnect(); }}>仍然断开</button></div></section></div>}
   </div>;
 }
