@@ -1,7 +1,7 @@
 {
   "name": "dm-debug-station",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Three-bus motor workbench for DMDebug serial protocol v2",
   "type": "module",
   "scripts": {

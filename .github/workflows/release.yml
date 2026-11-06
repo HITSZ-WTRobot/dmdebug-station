@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  desktop:
+    name: Desktop (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            platform: windows-x64
+            target: x86_64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc
+            bundle: ''
+          - runner: ubuntu-22.04
+            platform: linux-x64
+            target: x86_64-unknown-linux-gnu
+            rust_targets: x86_64-unknown-linux-gnu
+            bundle: appimage
+          - runner: macos-latest
+            platform: macos-universal
+            target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            bundle: app
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libudev-dev
+      - run: npm ci
+      - name: Check release version
+        shell: bash
+        run: node -e 'if (process.env.GITHUB_REF_NAME !== "v" + JSON.parse(require("fs").readFileSync("package.json")).version) process.exit(1)'
+      - run: npm test
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Build Windows executable
+        if: runner.os == 'Windows'
+        run: npm run tauri -- build --ci --no-bundle --target ${{ matrix.target }}
+      - name: Build Linux or macOS bundle
+        if: runner.os != 'Windows'
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+        run: npm run tauri -- build --ci --target '${{ matrix.target }}' --bundles '${{ matrix.bundle }}' --config '{"bundle":{"active":true}}'
+      - name: Stage Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release | Out-Null
+          Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/dm-debug-station.exe release/DMDebugStation-windows-x64.exe
+      - name: Stage Linux AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir release
+          images=(src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          test "${#images[@]}" -eq 1
+          test -f "${images[0]}"
+          cp "${images[0]}" release/DMDebugStation-linux-x64.AppImage
+      - name: Verify and package universal macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir release
+          app=src-tauri/target/universal-apple-darwin/release/bundle/macos/DMDebugStation.app
+          executable=$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")
+          lipo -verify_arch x86_64 arm64 "$app/Contents/MacOS/$executable"
+          ditto -c -k --sequesterRsrc --keepParent "$app" release/DMDebugStation-macos-universal.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: release/*
+          if-no-files-found: error
+
+  web:
+    name: Portable web
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build:web
+      - name: Package portable pages and documentation
+        run: |
+          mkdir release
+          zip -r release/DMDebugStation-web.zip web/index.html web/串口.html README.md doc/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-web
+          path: release/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish complete release
+    needs: [desktop, web]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+      - name: Verify complete asset set and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for file in DMDebugStation-windows-x64.exe DMDebugStation-linux-x64.AppImage DMDebugStation-macos-universal.zip DMDebugStation-web.zip; do
+            test -s "release/$file"
+          done
+          (cd release && sha256sum ./*) > SHA256SUMS
+          mv SHA256SUMS release/
+          gh release create "$GITHUB_REF_NAME" release/* --verify-tag --title "DMDebug Station $GITHUB_REF_NAME" --notes "Windows x64、Linux x64 AppImage、macOS universal (Intel + Apple Silicon) 与便携网页。macOS 仅 ad-hoc 签名，未使用 Developer ID、未公证；Windows EXE 未代码签名。WinMM 手柄/输入诊断与 RFCOMM/SPP 直连仅支持 Windows。底盘旋转 ±360°/s、手柄平移 0.4m/s、轮速包络 360rpm，需配套更新固件。下载校验与使用说明见 doc/RELEASE.md；构建和回归不代表实板或带载安全验证。"
