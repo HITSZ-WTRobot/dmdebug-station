@@ -129,10 +129,11 @@ struct Engine {
     input: Option<(BodyVelocity, u64)>, input_at: u64, started_at: u64,
     velocity_at: Option<u64>, chassis_at: Option<u64>, chassis_ready: bool, enable_ack: bool,
     dirty: bool, last_publish: u64,
+    bluetooth_tx_at: Option<u64>, bluetooth_last_opcode: u8,
 }
 impl Engine {
     fn new() -> Self {
-        Self { status: NativeStatus::default(), gamepad: GamepadControlState { phase: "off".into(), message: "手柄遥控未开启".into() }, generation: 0, epoch: 0, queue: VecDeque::new(), active: None, sequence: 1, parser: Stream::default(), effects: VecDeque::new(), events: VecDeque::new(), selected: 0x0a, manual: false, heartbeat_at: 0, state_at: 0, wheels_at: 0, now: 0, last_tick: 0, input: None, input_at: 0, started_at: 0, velocity_at: None, chassis_at: None, chassis_ready: false, enable_ack: false, dirty: true, last_publish: 0 }
+        Self { status: NativeStatus::default(), gamepad: GamepadControlState { phase: "off".into(), message: "手柄遥控未开启".into() }, generation: 0, epoch: 0, queue: VecDeque::new(), active: None, sequence: 1, parser: Stream::default(), effects: VecDeque::new(), events: VecDeque::new(), selected: 0x0a, manual: false, heartbeat_at: 0, state_at: 0, wheels_at: 0, now: 0, last_tick: 0, input: None, input_at: 0, started_at: 0, velocity_at: None, chassis_at: None, chassis_ready: false, enable_ack: false, dirty: true, last_publish: 0, bluetooth_tx_at: None, bluetooth_last_opcode: 0 }
     }
     fn log(&mut self, level: &str, message: impl Into<String>, bytes: Option<&Frame>) {
         let raw_hex = bytes.map(|b| {
@@ -217,6 +218,7 @@ impl Engine {
     }
     fn opened(&mut self, mode: String, port: String, reply: Reply) {
         self.status = NativeStatus { mode: mode.clone(), port_name: if mode == "demo" { "协议演示 · 无硬件连接".into() } else { port }, port_open: true, ..NativeStatus::default() };
+        self.bluetooth_tx_at = None; self.bluetooth_last_opcode = 0;
         self.last_tick = self.now; self.handshake(reply);
     }
     fn refresh_steps(&self) -> Vec<Step> {
@@ -306,6 +308,19 @@ impl Engine {
             else { let _ = reply.send(Err("断开连接前未能建立全体失能屏障".into())); }
         } else { self.close(); let _ = reply.send(Ok(Vec::new())); }
     }
+    fn response_timeout(&self) -> u64 {
+        // 蓝牙实测回包超过150ms；最多等400ms后断开，不叠加重试越过500ms门禁。
+        if self.status.mode == "bluetooth" { 400 } else { 150 }
+    }
+    fn timeout_message(&self) -> String {
+        let Some(tx) = self.active.as_ref() else { return "请求无完整应答".into(); };
+        let missing: Vec<String> = tx.expected.iter()
+            .filter(|id| !tx.responses.iter().any(|frame| frame[7] == **id))
+            .map(|id| format!("0x{id:02X}")).collect();
+        format!("#{} 命令0x{:02X}在{}ms内未收齐应答（{}/{}，缺少{}）；未确认动作结果，已停止心跳并关闭通信",
+            u16_at(&tx.bytes, 4), tx.step.opcode, self.response_timeout(), tx.responses.len(),
+            tx.expected.len(), missing.join("/"))
+    }
     fn pump(&mut self) {
         if self.active.is_some() || !self.status.port_open { return; }
         let Some(mut job) = self.queue.pop_front() else { return; };
@@ -313,11 +328,18 @@ impl Engine {
         let Some(step) = job.steps.pop_front() else { return; };
         let bytes = match request(self.sequence, step.opcode, step.id, &step.values) { Ok(bytes) => bytes, Err(error) => { Self::reject(&mut job,&error); return; } };
         self.sequence = self.sequence.wrapping_add(1);
-        let expected = expected(step.opcode,step.id); let retries = if matches!(step.opcode, VELOCITY | MOTOR_VELOCITY) { 0 } else { 1 };
-        self.active = Some(Transaction { job, step, bytes, expected, responses: Vec::new(), deadline: self.now + 150, retries }); self.send_active();
+        let expected = expected(step.opcode,step.id);
+        let retries = if self.status.mode == "bluetooth" || matches!(step.opcode, VELOCITY | MOTOR_VELOCITY) { 0 } else { 1 };
+        self.active = Some(Transaction { job, step, bytes, expected, responses: Vec::new(), deadline: self.now + self.response_timeout(), retries }); self.send_active();
     }
     fn send_active(&mut self) {
-        let Some(tx) = self.active.as_mut() else { return; }; tx.deadline = self.now + 150; let bytes = tx.bytes;
+        let timeout = self.response_timeout();
+        let Some(tx) = self.active.as_mut() else { return; }; tx.deadline = self.now + timeout; let bytes = tx.bytes;
+        if self.status.mode == "bluetooth" {
+            self.bluetooth_tx_at = Some(self.now); self.bluetooth_last_opcode = bytes[6];
+            if bytes[6] == STATE && matches!(bytes[7], 255 | 0x40) { self.state_at = self.now; }
+            if bytes[6] == WHEELS { self.wheels_at = self.now; }
+        }
         self.status.tx_frames += 1; self.dirty = true; self.log("tx",format!("#{} 命令 0x{:02X} · 0x{:02X}",u16_at(&bytes,4),bytes[6],bytes[7]),Some(&bytes)); self.effects.push_back(Effect::Write(bytes));
     }
     fn incoming(&mut self, bytes: &[u8]) {
@@ -397,6 +419,27 @@ impl Engine {
         Self::answer(&mut tx.job,Ok(returned));
         match tx.job.after { After::None => {}, After::Disconnect(reply) => { self.close(); let _ = reply.send(Ok(Vec::new())); }, After::Reconnect(mode,port,reply) => { self.close(); self.effects.push_back(Effect::Open(mode,port,reply)); } }
     }
+    fn poll_bluetooth(&mut self, now: u64) {
+        let remote_active = self.gamepad.phase == "active";
+        let velocity_due = remote_active && self.velocity_at.map_or(true, |at| now.saturating_sub(at) >= 100)
+            && self.input.as_ref().is_some_and(|(target, at)| now.saturating_sub(*at) < 250 && valid_target(target));
+        let state_due = now.saturating_sub(self.state_at) >= if remote_active { 200 } else { 400 };
+        // 慢链路下查询和最新速度交替，不能用不断过期的查询饿死速度，也不能反过来。
+        if velocity_due && (!state_due || self.bluetooth_last_opcode == STATE) {
+            self.velocity_at = Some(now);
+            let target = &self.input.as_ref().expect("速度到期时已检查新鲜输入").0;
+            let values = vec![target.vx, target.vy, target.wz];
+            self.queue.push_back(self.job(Tag::Velocity, vec![Step { opcode: VELOCITY, id: 0x40, values, checked: false }], None, None));
+        } else if state_due {
+            self.queue.push_back(self.job(Tag::Poll, vec![step(STATE, 255)], None, None));
+        } else if !remote_active && self.selected == 0x40 && now.saturating_sub(self.wheels_at) >= 1000 {
+            // 详细四轮查询降频；遥控期间以底盘状态安全门禁为先，不额外争用带宽。
+            self.queue.push_back(self.job(Tag::Poll, vec![step(WHEELS, 0x40)], None, None));
+        } else if self.bluetooth_tx_at.is_none_or(|at| now.saturating_sub(at) >= 100) {
+            // 固件所有合法请求都会刷新链路计时，持续状态/速度通信时无需冗余心跳。
+            self.queue.push_back(self.job(Tag::Poll, vec![step(HEARTBEAT, 255)], None, None));
+        }
+    }
     fn tick(&mut self, now: u64) {
         self.now = now;
         // 主机挂起超过固件 500ms 锁存边界后禁止恢复旧会话心跳/重试动作。
@@ -415,9 +458,12 @@ impl Engine {
                 let mut tx = self.active.take().unwrap(); Self::reject(&mut tx.job,"操作已被安全停机取消；不重发过期动作");
             } else if self.active.as_ref().unwrap().retries > 0 {
                 self.active.as_mut().unwrap().retries -= 1; self.log("warn","150 ms 未收齐应答，原字节最多重发一次",None); self.send_active();
-            } else { self.fail("请求无完整应答；未确认动作结果，已停止心跳并关闭通信","unresponsive"); return; }
+            } else { self.fail(self.timeout_message(),"unresponsive"); return; }
         }
         if self.active.is_none() && self.queue.is_empty() && self.status.phase == "ready" && !self.manual && self.gamepad.phase != "stopping" {
+            if self.status.mode == "bluetooth" {
+                self.poll_bluetooth(now);
+            } else {
             // 最早到期轮询优先于速度，不积累节拍，避免零速/满速流饿死心跳。
             let mut due = self.heartbeat_at + 100; let mut op = HEARTBEAT; let mut id = 255;
             if self.state_at + 200 < due { due = self.state_at + 200; op = STATE; }
@@ -432,6 +478,7 @@ impl Engine {
                         self.queue.push_back(self.job(Tag::Velocity,vec![Step { opcode: VELOCITY,id:0x40,values,checked:false }],None,None));
                     }
                 }
+            }
             }
         }
         self.pump(); if self.dirty && now.saturating_sub(self.last_publish) >= 100 { self.publish(); }
@@ -923,10 +970,15 @@ mod tests {
         let mut e = Engine::new(); let (io, mut peer, writes) = socket_io(512, None); let (mut owner, reply, _) = buffered_open(&mut e, Ok(io));
         owner.poll_open(&mut e); owner.effects(&mut e, &Arc::new(never_open));
         assert_eq!(e.status.phase, "handshaking"); assert!(e.status.port_open);
-        e.tick(150); owner.effects(&mut e, &Arc::new(never_open)); e.tick(300); owner.effects(&mut e, &Arc::new(never_open));
-        assert!(reply.try_recv().unwrap().unwrap_err().contains("蓝牙链路已建立，但固件握手失败/无应答"));
-        assert!(owner.io.is_none()); assert_eq!(closed_bytes(&mut peer).len(), 128); assert_eq!(writes.lock().unwrap().len(), 2);
-        e.tick(1000); owner.effects(&mut e, &Arc::new(never_open)); assert_eq!(writes.lock().unwrap().len(), 2);
+        e.tick(150); owner.effects(&mut e, &Arc::new(never_open));
+        e.tick(399); owner.effects(&mut e, &Arc::new(never_open));
+        assert!(matches!(reply.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(owner.io.is_some()); assert_eq!(writes.lock().unwrap().len(), 1);
+        e.tick(400); owner.effects(&mut e, &Arc::new(never_open));
+        assert!(reply.try_recv().unwrap().is_err());
+        assert!(owner.io.is_none()); assert_eq!(closed_bytes(&mut peer).len(), 64);
+        assert_eq!(e.status.phase, "unresponsive"); assert!(!e.status.port_open);
+        e.tick(1000); owner.effects(&mut e, &Arc::new(never_open)); assert_eq!(writes.lock().unwrap().len(), 1);
     }
     #[test]
     fn bluetooth_would_block_and_fragmented_reads_use_existing_parser() {
@@ -1017,3 +1069,7 @@ mod tests {
     }
     impl Engine {fn responses_for_test(&self)->usize {self.events.iter().filter(|e|matches!(e,Event::Response(_))).count()}}
 }
+
+#[cfg(test)]
+#[path = "bluetooth_timing_tests.rs"]
+mod bluetooth_timing_tests;
