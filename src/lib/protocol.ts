@@ -1,4 +1,4 @@
-// Byte contract: DMDebug/SERIAL_PROTOCOL.md v2. Logical IDs are not raw CAN IDs.
+// Byte contract: https://github.com/HITSZ-WTRobot/FDCAN_DM_TEST/blob/main/doc/SERIAL_PROTOCOL.md v2. Logical IDs are not raw CAN IDs.
 export const VERSION = 2;
 export const FRAME_SIZE = 64;
 export const BROADCAST = 0xff;

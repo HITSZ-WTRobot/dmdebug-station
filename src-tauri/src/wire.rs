@@ -123,7 +123,7 @@ mod golden_vectors {
     use super::*;
     #[test]
     fn protocol_document_independent_crc_vectors() {
-        // SERIAL_PROTOCOL.md 第 11/12 节，预期值来自独立 binascii.crc_hqx，非本模块生成。
+        // https://github.com/HITSZ-WTRobot/FDCAN_DM_TEST/blob/main/doc/SERIAL_PROTOCOL.md 第 11/12 节，预期值来自独立 binascii.crc_hqx，非本模块生成。
         for (seq,op,id,values,checksum) in [
             (1,HEARTBEAT,255,vec![],[0xb7,0xd6]),
             (2,STATE,255,vec![],[0x5f,0x62]),
