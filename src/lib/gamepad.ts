@@ -1,6 +1,6 @@
 import type { BodyVelocity } from './protocol';
 
-export const GAMEPAD_LIMITS = { translation: 0.4, rotation: 10, wheelRpm: 160 } as const;
+export const GAMEPAD_LIMITS = { translation: 0.4, rotation: 360, wheelRpm: 360 } as const;
 export const DEFAULT_DEADZONE = 0.12;
 export interface GamepadSample {
   id: string;

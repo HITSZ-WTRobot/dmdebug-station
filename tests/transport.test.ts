@@ -1,10 +1,42 @@
 import { afterEach, beforeEach, describe, mock, test, type Mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { ProtocolDemo } from '../src/lib/demo';
-import { BROADCAST, DEVICES, Opcode, calcCrc16, decodeFrame, encodeRequest, type Response } from '../src/lib/protocol';
+import { BROADCAST, DEVICES, Opcode, calcCrc16, decodeFrame, encodeRequest, BODY_LIMITS, bodyVelocityWithinLimits, type Response } from '../src/lib/protocol';
 import { TransportManager } from '../src/lib/transport';
 import type { ConnectionState } from '../src/store/atoms';
 
+test('保守包络使用查询较小上限与几何参数，未知几何关闭手动许可', () => {
+  assert.equal(bodyVelocityWithinLimits({ vx: .4, vy: 0, wz: 360 }), true);
+  assert.equal(bodyVelocityWithinLimits({ vx: 1, vy: 0, wz: 360 }), false);
+  const legacy = { ...BODY_LIMITS, maxWz: 10, maxWheelRpm: 160 };
+  assert.equal(bodyVelocityWithinLimits({ vx: .4, vy: 0, wz: 10 }, legacy), true);
+  assert.equal(bodyVelocityWithinLimits({ vx: 0, vy: 0, wz: 11 }, legacy), false);
+  assert.equal(bodyVelocityWithinLimits({ vx: 1, vy: 0, wz: 0 }, { ...BODY_LIMITS, radiusMm: 1 }), false);
+  for (const radiusMm of [0, -1, NaN, Infinity]) assert.equal(bodyVelocityWithinLimits({ vx: 0, vy: 0, wz: 0 }, { ...BODY_LIMITS, radiusMm }), false);
+  assert.equal(bodyVelocityWithinLimits({ vx: 0, vy: 0, wz: 0 }, null), false);
+});
+
+test('演示底盘接受纯平移、纯旋转及手柄组合；拒绝超包络并保留旧目标', () => {
+  const demo = new ProtocolDemo(); let sequence = 1;
+  const request = (opcode: number, values: number[] = []) => decodeFrame(demo.handle(encodeRequest(sequence++, opcode, 0x40, values))[0]);
+  const parameters = request(Opcode.Parameters);
+  assert.equal(parameters.type, 'chassis-parameters');
+  if (parameters.type === 'chassis-parameters') {
+    assert.equal(bodyVelocityWithinLimits({ vx: 1, vy: 0, wz: 0 }, parameters), true);
+    assert.equal(bodyVelocityWithinLimits({ vx: 0, vy: 0, wz: 360 }, parameters), true);
+    assert.equal(bodyVelocityWithinLimits({ vx: .4, vy: 0, wz: 360 }, parameters), true);
+    assert.equal(bodyVelocityWithinLimits({ vx: 1, vy: 0, wz: 360 }, parameters), false);
+  }
+  assert.equal(request(Opcode.Enable).result, 0);
+  for (const values of [[1, 0, 0], [0, 0, 360], [.4, 0, 360]]) assert.equal(request(Opcode.BodyVelocity, values).result, 0);
+  assert.equal(request(Opcode.BodyVelocity, [1, 0, 360]).result, 6);
+  const state = request(Opcode.State);
+  assert.equal(state.type, 'chassis-state');
+  if (state.type === 'chassis-state') {
+    assert.deepEqual(state.target, { vx: Math.fround(.4), vy: 0, wz: 360 });
+    assert.equal(state.lastResult, 6);
+  }
+});
 let now = 0;
 let windowTimerCalls = 0;
 let requestedPort: SerialBoundary;
@@ -339,6 +371,29 @@ describe('连接专属 Worker 通信时钟', () => {
 });
 
 describe('手柄单槽调度与安全退出', () => {
+  test('旧 10 deg/s / 160 rpm 固件禁止开启手柄', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    h.port.filter = (replies, request) => request[6] === Opcode.Parameters ? replies.map(reply => editReply(reply, view => {
+      view.setFloat32(22, 10, true); view.setFloat32(26, 160, true);
+    })) : replies;
+    await assert.rejects(h.manager.startGamepadControl(), /固件版本或速度限制不匹配/);
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+    assert.equal(h.port.writes.some(write => write.bytes[6] === Opcode.Enable), false);
+  });
+
+  test('0.4 m/s 固件可开启手柄，外部目标保持 1 m/s 并拒绝超包络组合', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    h.port.filter = (replies, request) => request[6] === Opcode.Parameters ? replies.map(reply => editReply(reply, view => {
+      view.setFloat32(14, .4, true); view.setFloat32(18, .4, true);
+    })) : replies;
+    await h.manager.startGamepadControl();
+    for (const target of [{ vx: 1, vy: 0, wz: 0 }, { vx: 0, vy: 0, wz: 360 }, { vx: .4, vy: 0, wz: 360 }]) {
+      assert.doesNotThrow(() => h.manager.updateGamepadControl(target));
+    }
+    assert.throws(() => h.manager.updateGamepadControl({ vx: 1, vy: 0, wz: 360 }), /无效/);
+    await flushMessages();
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+  });
   test('参数核对后只使能底盘，ACK 不代替四轮实际状态', async () => {
     const h = harness(); await h.manager.connect('web-serial');
     const start = h.port.writes.length;

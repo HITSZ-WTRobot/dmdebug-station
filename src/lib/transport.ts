@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { NativeTransportAdapter } from './native-transport';
-import { BROADCAST, Opcode, OPCODE_NAMES, StreamUnpacker, bytesToHex, encodeRequest, expectedResponseIds, hexId, resultName,
+import { BROADCAST, Opcode, OPCODE_NAMES, StreamUnpacker, bytesToHex, encodeRequest, expectedResponseIds, hexId, resultName, bodyVelocityWithinLimits,
   type Response, type Info, type ProtocolIssue, type BodyVelocity, type ChassisState } from './protocol';
 import { ProtocolDemo } from './demo';
 import type { ConnectionState, TransportMode, PlatformInfo, SerialPortInfo, BluetoothDeviceInfo, LogLevel } from '../store/atoms';
@@ -125,8 +125,8 @@ export class TransportManager {
       const parameters = await this.request(Opcode.Parameters, 0x40);
       this.requireGamepad(generation);
       const limits = parameters.find(response => response.type === 'chassis-parameters');
-      if (!limits || limits.result !== 0 || !(limits.maxVx >= 1 && limits.maxVy >= 1 && limits.maxWz >= 10 && limits.maxWheelRpm >= 160)) {
-        throw new Error('固件版本或速度限制不匹配：手柄遥控需要平移至少 1 m/s、旋转 10°/s、轮速上限至少 160 rpm；请更新下位机固件');
+      if (!limits || limits.result !== 0 || ![limits.maxVx, limits.maxVy, limits.maxWz, limits.maxWheelRpm].every(Number.isFinite) || !(limits.maxVx >= 0.4 && limits.maxVy >= 0.4 && limits.maxWz >= 360 && limits.maxWheelRpm >= 360)) {
+        throw new Error('固件版本或速度限制不匹配：手柄遥控需要平移至少 0.4 m/s、旋转 360°/s、轮速上限至少 360 rpm；请更新下位机固件');
       }
       enableRequested = true;
       const replies = await this.request(Opcode.Enable, 0x40);
@@ -149,8 +149,8 @@ export class TransportManager {
   updateGamepadControl(target: BodyVelocity): void {
     if (this.native) throw new Error('桌面版不接受前端手柄采样输入');
     if (this.gamepadState.phase !== 'enabling' && this.gamepadState.phase !== 'active') return;
-    if (![target.vx, target.vy, target.wz].every(Number.isFinite) || Math.hypot(target.vx, target.vy) > 1 || Math.abs(target.wz) > 10) {
-      void this.stopGamepadControl('手柄输入超出平移 1 m/s / 旋转 10°/s 安全范围').catch(() => {});
+    if (!bodyVelocityWithinLimits(target)) {
+      void this.stopGamepadControl('手柄输入超出平移 1 m/s / 旋转 360°/s / 轮速 360 rpm 合成安全范围').catch(() => {});
       throw new Error('无效的手柄速度；已请求退出遥控');
     }
     this.gamepadInput = { vx: target.vx, vy: target.vy, wz: target.wz }; this.gamepadInputAt = performance.now();

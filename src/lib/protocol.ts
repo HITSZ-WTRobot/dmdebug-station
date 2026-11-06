@@ -42,6 +42,20 @@ export const hexId = (id: number) => `0x${id.toString(16).toUpperCase().padStart
 export const resultName = (result: number) => RESULT_NAMES[result] ?? `未知结果 ${result}`;
 export const bytesToHex = (data: Uint8Array) => Array.from(data, b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
 
+export const BODY_LIMITS = { maxVx: 1, maxVy: 1, maxWz: 360, maxWheelRpm: 360, radiusMm: 63.5, distanceXmm: 435, distanceYmm: 435 } as const;
+type BodyLimits = { [K in keyof typeof BODY_LIMITS]: number };
+export function bodyVelocityWithinLimits(target: BodyVelocity, limits: BodyLimits | null | undefined = BODY_LIMITS): boolean {
+  if (!limits || ![limits.maxVx, limits.maxVy, limits.maxWz, limits.maxWheelRpm, limits.radiusMm, limits.distanceXmm, limits.distanceYmm].every(n => Number.isFinite(n) && n > 0) ||
+    ![target.vx, target.vy, target.wz].every(Number.isFinite)) return false;
+  const speed = Math.hypot(target.vx, target.vy);
+  const arm = Math.hypot(limits.distanceXmm, limits.distanceYmm) * 0.0005;
+  return Math.abs(target.vx) <= Math.min(1, limits.maxVx) &&
+    Math.abs(target.vy) <= Math.min(1, limits.maxVy) &&
+    speed <= Math.min(1, limits.maxVx, limits.maxVy) + 1e-6 &&
+    Math.abs(target.wz) <= Math.min(360, limits.maxWz) &&
+    speed + arm * Math.abs(target.wz) * Math.PI / 180 <=
+      Math.min(360, limits.maxWheelRpm) * 2 * Math.PI * limits.radiusMm * 0.001 / 60 + 1e-6;
+}
 const CRC_TABLE = new Uint16Array(256);
 for (let i = 0; i < 256; i++) {
   let value = i << 8;

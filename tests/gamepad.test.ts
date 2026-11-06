@@ -44,14 +44,14 @@ test('三控制轴固定方向、比例与限幅，输入预览不依赖许可',
   assert.deepEqual(forward.target, { vx: 0.4, vy: 0, wz: 0 });
   const right = input(pad([1, 0, 0.5]));
   assert.equal(right.target.vy, -0.4);
-  close(right.target.wz, -10 * 0.38 / 0.88);
-  assert.equal(input(pad([0, 0, 1])).target.wz, -10);
-  assert.equal(input(pad([0, 0, -1])).target.wz, 10);
+  close(right.target.wz, -360 * 0.38 / 0.88);
+  assert.equal(input(pad([0, 0, 1])).target.wz, -360);
+  assert.equal(input(pad([0, 0, -1])).target.wz, 360);
   close(input(pad([0, -0.5, 0])).target.vx, 0.4 * 0.38 / 0.88);
   const diagonal = input(pad([1, -1, 2])).target;
   close(diagonal.vx, 0.4 * Math.SQRT1_2);
   close(diagonal.vy, -0.4 * Math.SQRT1_2);
-  assert.equal(diagonal.wz, -10);
+  assert.equal(diagonal.wz, -360);
   for (const x of [-1, -0.6, -0.5, 0, 0.5, 0.6, 1]) for (const y of [-1, -0.6, -0.5, 0, 0.5, 0.6, 1]) {
     const target = input(pad([x, y, 0])).target;
     assert.ok(Math.hypot(target.vx, target.vy) <= 0.4);

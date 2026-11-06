@@ -1,5 +1,5 @@
 import { memo, useEffect, useId, useRef, useState } from 'react';
-import { Opcode, hexId, resultName, type Response } from '../lib/protocol';
+import { Opcode, hexId, resultName, bodyVelocityWithinLimits, type Response } from '../lib/protocol';
 import type { DeviceSnapshot } from '../store/atoms';
 
 interface DeviceControlsProps {
@@ -69,9 +69,9 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
   const dynamics = limits.slice(kind === 'joint' ? 2 : 0);
   const limitsValid = limits.every(wireFinite) && dynamics.every(n => Math.fround(n) > 0) &&
     (kind !== 'joint' || limits[0] >= -180 && limits[1] <= 180 && Math.fround(limits[0]) < Math.fround(limits[1]));
-  const caps = { vx: Math.min(1, body?.maxVx ?? 0.1), vy: Math.min(1, body?.maxVy ?? 0.1), wz: Math.min(10, body?.maxWz ?? 10) };
+  const caps = { vx: Math.min(1, body?.maxVx ?? 0), vy: Math.min(1, body?.maxVy ?? 0), wz: Math.min(360, body?.maxWz ?? 0) };
   const speeds = [numeric(value('vx', chassis?.target.vx)), numeric(value('vy', chassis?.target.vy)), numeric(value('wz', chassis?.target.wz))];
-  const speedValid = speeds.every(wireFinite) && Math.abs(speeds[0]) <= caps.vx && Math.abs(speeds[1]) <= caps.vy && Math.abs(speeds[2]) <= caps.wz && Math.hypot(speeds[0], speeds[1]) <= Math.min(caps.vx, caps.vy) + 1e-6;
+  const speedValid = speeds.every(wireFinite) && body?.result === 0 && bodyVelocityWithinLimits({ vx: speeds[0], vy: speeds[1], wz: speeds[2] }, body);
   const gateReason = !ready ? '协议尚未就绪；串口打开不代表电机在线。' : !state ? '等待设备状态反馈。' : !fresh ? '状态已过期，请刷新后操作。' : !flags?.connected ? '设备离线；显示值可能是旧缓存。' : flags.hostLinkTimeout ? '设备仍报告主机链路超时，等待新心跳与反馈。' : null;
   const zeroReason = gateReason ?? (!disabled ? '请先失能并等待真实失能反馈。' : !idle ? '设备仍在运动或有待处理命令。' : stationaryRpm == null ? '需要查询真实参数以确认静止阈值。' : !stationary ? '反馈速度尚未低于静止阈值。' : locked ? '等待当前事务结束。' : '静止稳定样本仍由下位机最终检查。');
 
@@ -172,7 +172,7 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
         </div>
         <div className="actions"><button type="submit" className="button primary" disabled={!canMove || !speedValid}>应用速度</button></div>
       </form>
-      <p className="notice warning">配套新固件合成平移速度 ≤ 1 m/s、|wz| ≤ 10 deg/s、轮速 ≤ 160 rpm；实际查询上限见下方。斜向合成同样受限，超限拒绝不缩放。旧固件仍按查询出的较小上限操作；实际轮向及提速需先安全验证。</p>
+      <p className="notice warning">配套新固件合成平移速度 ≤ 1 m/s、|wz| ≤ 360 deg/s、轮速 ≤ 360 rpm；平移与旋转共同受保守轮速包络限制，超限拒绝不缩放。旧固件仍按查询出的较小上限及几何参数操作；未知或无效几何参数禁止发送。</p>
       <dl className="metric-list">
         <div><dt>查询上限 vx / vy / wz / 轮速</dt><dd className="mono">{format(body?.maxVx)} / {format(body?.maxVy)} / {format(body?.maxWz)} / {format(body?.maxWheelRpm)}</dd></div>
         <div><dt>轮半径 / X / Y 距离 · mm</dt><dd className="mono">{format(body?.radiusMm)} / {format(body?.distanceXmm)} / {format(body?.distanceYmm)}</dd></div>

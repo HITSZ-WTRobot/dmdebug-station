@@ -98,7 +98,7 @@ impl Demo {
                         }
                         VELOCITY => { let body = [float(q, 12), float(q, 16), float(q, 20)];
                             if m.kind != 4 { code = 10; } else if !m.enabled { code = 3; }
-                            else if body.iter().any(|v| !v.is_finite()) || body[0].hypot(body[1]) > 1.000001 || body[2].abs() > 10. { code = 6; } else { m.body = body; }
+                            else if !super::valid_target(&super::BodyVelocity { vx: body[0], vy: body[1], wz: body[2] }) { code = 6; } else { m.body = body; }
                         }
                         LIMITS => {
                             if m.kind > 2 { code = 10; } else if m.enabled { code = 4; }
@@ -130,7 +130,7 @@ impl Demo {
     fn parameters(q: &Frame, m: &Device) -> Frame {
         let mut b = response(q, m.id, 0, if m.kind == 5 { 26 } else if m.kind == 4 { 30 } else { 48 });
         if m.kind == 5 { for (i, v) in [18., 0.1, 0., 8000., 300., 0.1].iter().enumerate() { put_float(&mut b, 14 + 4 * i, *v); } }
-        else if m.kind == 4 { for (i, v) in [1., 1., 10., 160., 63.5, 435., 435.].iter().enumerate() { put_float(&mut b, 14 + 4 * i, *v); } }
+        else if m.kind == 4 { for (i, v) in [1., 1., 360., 360., 63.5, 435., 435.].iter().enumerate() { put_float(&mut b, 14 + 4 * i, *v); } }
         else { put_u16(&mut b, 14, if m.kind == 1 { 1 } else { 3 }); b[16] = m.kind; b[17] = if m.kind == 1 { 2 } else { 1 }; b[18] = 1;
             let values = if m.kind == 1 { [f32::NAN, f32::NAN, m.limits[0], m.limits[1], m.limits[2], 5., 0.5, 0., 0.1885, 1.1] } else { [m.limits[0], m.limits[1], m.limits[2], m.limits[3], m.limits[4], 5., 0.5, 0., 0.3, 0.1] };
             for (i, v) in values.iter().enumerate() { put_float(&mut b, 20 + i * 4, *v); }
@@ -140,6 +140,28 @@ impl Demo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chassis_velocity_envelope_and_malformed_commands_retain_target() {
+        let mut demo = Demo::new(0); let mut sequence = 0;
+        let mut send = |op, values: &[f32]| {
+            sequence += 1;
+            let mut q = request(sequence, op, 0x40, &vec![0.; values.len()]).unwrap();
+            for (i, value) in values.iter().enumerate() { put_float(&mut q, 12 + 4 * i, *value); }
+            seal(&mut q);
+            demo.handle(&q, sequence as u64)[0]
+        };
+        assert_eq!(u16_at(&send(ENABLE, &[]), 12), 0);
+        for body in [[1., 0., 0.], [0., 1., 0.], [0., 0., 360.], [0.4, 0., 360.]] {
+            assert_eq!(u16_at(&send(VELOCITY, &body), 12), 0);
+            let state = send(STATE, &[]);
+            assert_eq!([float(&state, 28), float(&state, 32), float(&state, 36)], body);
+        }
+        for body in [vec![1., 0., 360.], vec![0., 0., 361.], vec![1.01, 0., 0.], vec![f32::NAN, 0., 0.], vec![0., f32::INFINITY, 0.], vec![0.1, 0.2]] {
+            assert_ne!(u16_at(&send(VELOCITY, &body), 12), 0);
+            let state = send(STATE, &[]);
+            assert_eq!([float(&state, 28), float(&state, 32), float(&state, 36)], [0.4, 0., 360.]);
+        }
+    }
     #[test]
     fn nine_devices_parameters_wheels_and_commands_are_valid() {
         let mut d = Demo::new(0); let mut seq = 0;

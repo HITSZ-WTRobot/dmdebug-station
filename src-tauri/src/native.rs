@@ -83,7 +83,7 @@ impl NativeState {
         Ok(())
     }
     pub fn gamepad_update(&self, target: BodyVelocity) -> Result<(), String> {
-        if !valid_target(&target) { self.gamepad_stop("手柄输入超过平移 1 m/s 或旋转 10°/s 安全范围")?; return Err("无效的手柄速度；已请求退出遥控".into()); }
+        if !valid_target(&target) { self.gamepad_stop("手柄输入超出平移 1 m/s / 旋转 360°/s / 轮速 360 rpm 合成安全范围")?; return Err("无效的手柄速度；已请求退出遥控".into()); }
         let mut s = self.shared.lock().map_err(|_| "遥控状态锁异常")?;
         if matches!(s.gamepad.phase.as_str(), "enabling" | "active") { s.input = Some((s.generation, target, Instant::now())); }
         Ok(())
@@ -105,7 +105,14 @@ impl NativeState {
         let (tx, rx) = mpsc::channel(); self.send(make(tx))?; rx.recv().map_err(|_| "通信会话已关闭".to_string())?
     }
 }
-fn valid_target(v: &BodyVelocity) -> bool { v.vx.is_finite() && v.vy.is_finite() && v.wz.is_finite() && v.vx.hypot(v.vy) <= 1. && v.wz.abs() <= 10. }
+fn valid_target(v: &BodyVelocity) -> bool {
+    let speed = v.vx.hypot(v.vy);
+    let arm = 435_f32.hypot(435.) * 0.0005;
+    let wheel_speed = 360. * std::f32::consts::TAU * 0.0635 / 60.;
+    v.vx.is_finite() && v.vy.is_finite() && v.wz.is_finite()
+        && v.vx.abs() <= 1. && v.vy.abs() <= 1. && speed <= 1. + 1e-6 && v.wz.abs() <= 360.
+        && speed + arm * v.wz.abs().to_radians() <= wheel_speed + 1e-6
+}
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Log { level: String, message: String, #[serde(skip_serializing_if = "Option::is_none")] raw_hex: Option<String> }
@@ -401,7 +408,7 @@ impl Engine {
         }
         if tx.job.tag == Tag::GamepadStart && op == PARAMETERS {
             let b = &tx.responses[0];
-            if !(float(b,14) >= 1. && float(b,18) >= 1. && float(b,22) >= 10. && float(b,26) >= 160.) { self.input = None; self.gp("off","固件版本或速度限制不匹配：需要平移至少 1 m/s、旋转 10°/s、轮速至少 160 rpm；请更新固件"); return; }
+            if !(float(b,14) >= 0.4 && float(b,18) >= 0.4 && float(b,22) >= 360. && float(b,26) >= 360.) { self.input = None; self.gp("off","固件版本或速度限制不匹配：需要平移至少 0.4 m/s、旋转至少 360°/s、轮速至少 360 rpm；请更新固件"); return; }
         }
         if tx.job.tag == Tag::GamepadStart && op == ENABLE { self.enable_ack = true; self.started_at = self.now; self.gp("enabling","使能请求已应答，等待底盘四轮实际反馈确认"); }
         if tx.job.primary == Some(op) { tx.job.returned.extend(tx.responses.iter().map(|b| b.to_vec())); }
@@ -774,6 +781,42 @@ mod tests {
     }
     fn changed(mut b:Frame,change:impl FnOnce(&mut Frame))->Frame {change(&mut b);seal(&mut b);b}
     #[test]
+    fn external_velocity_envelope_and_invalid_input_revocation() {
+        let state = NativeState::default();
+        state.shared.lock().unwrap().gamepad.phase = "active".into();
+        for (vx, vy, wz) in [(1., 0., 0.), (0., 1., 0.), (0., 0., 360.), (0.4, 0., 360.)] {
+            assert!(state.gamepad_update(BodyVelocity { vx, vy, wz }).is_ok());
+            let shared = state.shared.lock().unwrap();
+            let target = &shared.input.as_ref().unwrap().1;
+            assert_eq!((target.vx, target.vy, target.wz), (vx, vy, wz));
+        }
+        for (vx, vy, wz) in [(1., 0., 360.), (0., 0., 361.), (1.01, 0., 0.), (f32::NAN, 0., 0.), (0., 0., f32::INFINITY)] {
+            let state = NativeState::default();
+            let (tx, rx) = mpsc::channel(); *state.sender.lock().unwrap() = Some(tx);
+            state.shared.lock().unwrap().gamepad.phase = "active".into();
+            state.gamepad_update(BodyVelocity { vx: 0.4, vy: 0., wz: 360. }).unwrap();
+            assert!(state.gamepad_update(BodyVelocity { vx, vy, wz }).is_err());
+            let shared = state.shared.lock().unwrap();
+            assert!(shared.input.is_none());
+            assert_eq!(shared.gamepad.phase, "stopping");
+            assert!(matches!(rx.try_recv(), Ok(Message::GamepadStop(_, _))));
+        }
+    }
+    #[test]
+    fn joystick_minimum_capabilities_arm_but_legacy_limits_do_not() {
+        for (translation, rotation, wheel, accepted) in [(0.4, 360., 360., true), (1., 10., 160., false), (0.4, 10., 360., false), (0.4, 360., 160., false), (0.39, 360., 360., false)] {
+            let mut h = Harness::ready(); h.e.start_gamepad(1); h.input(BodyVelocity::default(), 0); h.e.pump();
+            h.filtered(|q, frames| if q[6] == PARAMETERS {
+                frames.into_iter().map(|b| changed(b, |b| {
+                    put_float(b, 14, translation); put_float(b, 18, translation);
+                    put_float(b, 22, rotation); put_float(b, 26, wheel);
+                })).collect()
+            } else { frames });
+            assert_eq!(h.e.gamepad.phase, if accepted { "active" } else { "off" });
+            assert_eq!(h.sent.iter().any(|(_, b)| b[6] == ENABLE), accepted);
+        }
+    }
+    #[test]
     fn background_tick_drives_heartbeat_nine_states_and_four_wheels_without_ui() {
         let mut h=Harness::ready();h.e.selected=0x40;let start=h.sent.len();
         for now in (10..=2000).step_by(10) {h.tick(now);}
@@ -858,7 +901,7 @@ mod tests {
     }
     #[test]
     fn old_capability_rejected_and_enable_ack_without_feedback_not_active() {
-        let mut h=Harness::ready();h.e.start_gamepad(1);h.e.pump();h.filtered(|q,frames|if q[6]==PARAMETERS {frames.into_iter().map(|b|changed(b,|b|put_float(b,26,30.))).collect()}else{frames});
+        let mut h=Harness::ready();h.e.start_gamepad(1);h.e.pump();h.filtered(|q,frames|if q[6]==PARAMETERS {frames.into_iter().map(|b|changed(b,|b|{put_float(b,22,10.);put_float(b,26,160.);})).collect()}else{frames});
         assert_eq!(h.e.gamepad.phase,"off");assert!(h.sent.iter().all(|(_,b)|b[6]!=ENABLE));
         h.e.start_gamepad(2);h.e.pump();h.filtered(|q,frames|if q[6]==STATE && q[7]==0x40 {frames.into_iter().map(|b|changed(b,|b|{put_u16(b,14,1|16);b[53]=0;})).collect()}else{frames});
         assert_eq!(h.e.gamepad.phase,"enabling");assert!(h.sent.iter().all(|(_,b)|b[6]!=VELOCITY));

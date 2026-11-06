@@ -475,7 +475,7 @@ fn read_input(pad: &PadView) -> Result<Input, String> {
     let mut target = BodyVelocity {
         vx: if magnitude <= DEADZONE { 0.0 } else { -y / magnitude * speed },
         vy: if magnitude <= DEADZONE { 0.0 } else { -x / magnitude * speed },
-        wz: -remap_deadzone(rotation) * 10.0,
+        wz: -remap_deadzone(rotation) * 360.0,
     };
     // 浮点舍入也不能使斜推合成速度超过手柄平移上限。
     let actual_speed = target.vx.hypot(target.vy);
@@ -659,21 +659,21 @@ mod tests {
         pad.axes = vec![0.0, -0.5, 0.5, 1.0];
         let half = read_input(&pad).unwrap();
         assert!((half.target.vx - 0.4 * 0.38 / 0.88).abs() < 0.00001);
-        assert!((half.target.wz + 10.0 * 0.38 / 0.88).abs() < 0.00001);
+        assert!((half.target.wz + 360.0 * 0.38 / 0.88).abs() < 0.00001);
         assert_eq!(half.target.vy, 0.0);
         pad.axes = vec![1.0, -1.0, -1.0, -1.0];
         let full = read_input(&pad).unwrap();
         assert!(full.target.vx > 0.0 && full.target.vy < 0.0);
         assert!(full.target.vx.hypot(full.target.vy) <= 0.4);
         assert!((full.target.vx.hypot(full.target.vy) - 0.4).abs() < 0.00001);
-        assert_eq!(full.target.wz, 10.0);
+        assert_eq!(full.target.wz, 360.0);
         for x in -10..=10 {
             for y in -10..=10 {
                 pad.axes[0] = x as f32 / 10.0;
                 pad.axes[1] = y as f32 / 10.0;
                 let input = read_input(&pad).unwrap();
                 assert!(input.target.vx.hypot(input.target.vy) <= 0.4);
-                assert!(input.target.wz.abs() <= 10.0);
+                assert!(input.target.wz.abs() <= 360.0);
             }
         }
     }
