@@ -1,5 +1,5 @@
 import { memo, useEffect, useId, useRef, useState } from 'react';
-import { Opcode, hexId, resultName, type Response } from '../lib/protocol';
+import { Opcode, hexId, resultName, bodyVelocityWithinLimits, type Response } from '../lib/protocol';
 import type { DeviceSnapshot } from '../store/atoms';
 
 interface DeviceControlsProps {
@@ -42,36 +42,36 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
   const idle = !flags?.busy && !flags?.enablePending && (motor?.pendingCommand == null || motor.pendingCommand === 0);
   const disabled = !!flags && !flags.enabled && !flags.enablePending &&
     (motor ? motor.motorState === null || motor.motorState === 0 : chassis?.enabledMask === 0);
-  // State velocities are device-unit/s. stationaryRpm is always output-shaft rpm.
-  const velocityRpm = motor ? Math.abs(motor.velocity) * (motor.unit === 'mm' ? 60 / 226.2 : 1 / 6) : NaN;
+  // DM feedback is device-unit/s; M2006 feedback is already output-shaft rpm.
+  const velocityRpm = motor ? Math.abs(motor.velocity) * (motor.unit === 'rpm' ? 1 : motor.unit === 'mm' ? 60 / 226.2 : 1 / 6) : NaN;
   const stationaryRpm = dm?.stationaryRpm ?? dji?.stationaryRpm;
   const stationary = Number.isFinite(velocityRpm) && stationaryRpm != null &&
     Number.isFinite(stationaryRpm) && stationaryRpm > 0 && velocityRpm <= stationaryRpm;
-  const canZero = kind !== 'chassis' && available && disabled && idle && stationary && !locked;
-  const configured = kind === 'm2006' || kind === 'chassis' || !!flags?.limitsConfigured;
-  const zeroReady = kind === 'chassis' || !!flags?.zeroed;
+  const canZero = (kind === 'linear' || kind === 'joint') && available && disabled && idle && stationary && !locked;
+  const maxRpm = dji && wireFinite(dji.maxRpm) && dji.maxRpm > 0 ? dji.maxRpm : null;
+  const configured = kind === 'm2006' ? maxRpm !== null : kind === 'chassis' || !!flags?.limitsConfigured;
+  const zeroReady = kind === 'm2006' || kind === 'chassis' || !!flags?.zeroed;
   const canEnable = available && disabled && idle && configured && zeroReady && !locked &&
-    (kind !== 'm2006' || !flags?.fault) &&
-    (kind === 'chassis' ? chassis?.onlineMask === 15 && chassis.faultMask === 0 : kind === 'm2006' || stationary);
+    (kind === 'chassis' ? chassis?.onlineMask === 15 && chassis.faultMask === 0 : stationary);
   const confirmedEnabled = !!flags?.enabled && !flags.enablePending &&
     (kind !== 'chassis' || chassis?.onlineMask === 15 && chassis.enabledMask === 15);
   const canMove = available && confirmedEnabled && !flags?.fault && idle && zeroReady && configured && !locked;
   const canLimits = !!dm && available && disabled && idle && !!flags?.zeroed && !locked;
   const canSafetyAction = ready && !locked;
-  const lower = kind === 'm2006' ? 0 : kind === 'joint' ? Math.max(-180, dm?.min ?? -180) : undefined;
-  const upper = kind === 'm2006' ? 360 : kind === 'joint' ? Math.min(180, dm?.max ?? 180) : undefined;
+  const lower = kind === 'm2006' ? maxRpm === null ? undefined : -maxRpm : kind === 'joint' ? Math.max(-180, dm?.min ?? -180) : undefined;
+  const upper = kind === 'm2006' ? maxRpm ?? undefined : kind === 'joint' ? Math.min(180, dm?.max ?? 180) : undefined;
   const value = (key: keyof Drafts, confirmed?: number | null) => drafts[key] ?? (confirmed != null && Number.isFinite(confirmed) ? String(confirmed) : '');
   const target = numeric(value('target', motor?.target));
-  const targetValid = wireFinite(target) && (lower == null || target >= lower) && (upper == null || target <= upper);
+  const targetValid = wireFinite(target) && (kind !== 'm2006' || maxRpm !== null) && (lower == null || target >= lower) && (upper == null || target <= upper);
   const limits = kind === 'joint'
     ? [numeric(value('min', dm?.min)), numeric(value('max', dm?.max)), numeric(value('velocity', dm?.maxVelocity)), numeric(value('acceleration', dm?.maxAcceleration)), numeric(value('jerk', dm?.maxJerk))]
     : [numeric(value('velocity', dm?.maxVelocity)), numeric(value('acceleration', dm?.maxAcceleration)), numeric(value('jerk', dm?.maxJerk))];
   const dynamics = limits.slice(kind === 'joint' ? 2 : 0);
   const limitsValid = limits.every(wireFinite) && dynamics.every(n => Math.fround(n) > 0) &&
     (kind !== 'joint' || limits[0] >= -180 && limits[1] <= 180 && Math.fround(limits[0]) < Math.fround(limits[1]));
-  const caps = { vx: Math.min(0.1, body?.maxVx ?? 0.1), vy: Math.min(0.1, body?.maxVy ?? 0.1), wz: Math.min(10, body?.maxWz ?? 10) };
+  const caps = { vx: Math.min(1, body?.maxVx ?? 0), vy: Math.min(1, body?.maxVy ?? 0), wz: Math.min(360, body?.maxWz ?? 0) };
   const speeds = [numeric(value('vx', chassis?.target.vx)), numeric(value('vy', chassis?.target.vy)), numeric(value('wz', chassis?.target.wz))];
-  const speedValid = speeds.every(wireFinite) && Math.abs(speeds[0]) <= caps.vx && Math.abs(speeds[1]) <= caps.vy && Math.abs(speeds[2]) <= caps.wz;
+  const speedValid = speeds.every(wireFinite) && body?.result === 0 && bodyVelocityWithinLimits({ vx: speeds[0], vy: speeds[1], wz: speeds[2] }, body);
   const gateReason = !ready ? '协议尚未就绪；串口打开不代表电机在线。' : !state ? '等待设备状态反馈。' : !fresh ? '状态已过期，请刷新后操作。' : !flags?.connected ? '设备离线；显示值可能是旧缓存。' : flags.hostLinkTimeout ? '设备仍报告主机链路超时，等待新心跳与反馈。' : null;
   const zeroReason = gateReason ?? (!disabled ? '请先失能并等待真实失能反馈。' : !idle ? '设备仍在运动或有待处理命令。' : stationaryRpm == null ? '需要查询真实参数以确认静止阈值。' : !stationary ? '反馈速度尚未低于静止阈值。' : locked ? '等待当前事务结束。' : '静止稳定样本仍由下位机最终检查。');
 
@@ -85,7 +85,7 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
       const response = responses.find(item => item.id === id && item.opcode === opcode);
       if (!response) throw new Error('未收到此设备的动作确认');
       if (response.result !== 0) throw new Error(resultName(response.result));
-      setNotice({ error: false, text: `${label}已受理；实际使能、零点与运动结果以新的设备反馈为准。` });
+      setNotice({ error: false, text: kind === 'm2006' ? `${label}已受理；软件授权与实际转速以新的设备反馈为准。` : `${label}已受理；实际使能、零点与运动结果以新的设备反馈为准。` });
       if (opcode === Opcode.SetZero) {
         setShowZero(false);
         setDrafts(previous => { const { target, min, max, ...dynamics } = previous; return dynamics; });
@@ -120,7 +120,7 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
     <header className="panel-heading">
       <div><div className="eyebrow">设备操作 · {hexId(id)} · CAN{definition.bus}</div>
         <h2 className="panel-title" id={`${prefix}-title`}>{definition.name}</h2>
-        <p className="muted">{definition.model} · {definition.canLabel} · {kind === 'chassis' ? '车体系速度' : `位置单位 ${unit}`}</p>
+        <p className="muted">{definition.model} · {definition.canLabel} · {kind === 'chassis' ? '车体系速度' : kind === 'm2006' ? '输出轴速度 · rpm' : `位置单位 ${unit}`}</p>
       </div>
       <button type="button" className="button subtle small" disabled={!ready || locked} onClick={refresh}>刷新状态 / 参数</button>
     </header>
@@ -129,10 +129,10 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
     {notice && <p className={`notice ${notice.error ? 'danger' : 'success'}`} role={notice.error ? 'alert' : 'status'}>{notice.text}</p>}
     <div className="readout-grid">
       {motor ? <>
-        <div className="readout"><span>实际位置</span><strong className="mono">{format(motor.position)}</strong><small>{unit}</small></div>
-        <div className="readout"><span>实际速度</span><strong className="mono">{format(motor.velocity)}</strong><small>{unit}/s</small></div>
-        <div className="readout"><span>已受理目标</span><strong className="mono">{format(motor.target)}</strong><small>{unit} · 不是到位确认</small></div>
-        <div className="readout"><span>{kind === 'm2006' ? '速度控制总参考' : '轨迹位置参考'}</span><strong className="mono">{format(kind === 'm2006' ? motor.referenceVelocity : motor.reference)}</strong><small>{kind === 'm2006' ? 'deg/s · 含位置 PD' : unit}</small></div>
+        <div className="readout"><span>{kind === 'm2006' ? '诊断位置' : '实际位置'}</span><strong className="mono">{format(motor.position)}</strong><small>{kind === 'm2006' ? 'deg · 不参与控制' : unit}</small></div>
+        <div className="readout"><span>实际速度</span><strong className="mono">{format(motor.velocity)}</strong><small>{kind === 'm2006' ? 'rpm' : `${unit}/s`}</small></div>
+        <div className="readout"><span>{kind === 'm2006' ? '已受理速度目标' : '已受理目标'}</span><strong className="mono">{format(motor.target)}</strong><small>{kind === 'm2006' ? 'rpm' : `${unit} · 不是到位确认`}</small></div>
+        <div className="readout"><span>{kind === 'm2006' ? '速度 PID 参考' : '轨迹位置参考'}</span><strong className="mono">{format(kind === 'm2006' ? motor.referenceVelocity : motor.reference)}</strong><small>{kind === 'm2006' ? 'rpm · 直接速度控制' : unit}</small></div>
       </> : chassis ? <>
         <div className="readout"><span>实际 vx / vy</span><strong className="mono">{format(chassis.velocity.vx)} / {format(chassis.velocity.vy)}</strong><small>m/s · 轮速反解，不能校正打滑</small></div>
         <div className="readout"><span>实际 wz</span><strong className="mono">{format(chassis.velocity.wz)}</strong><small>deg/s</small></div>
@@ -144,8 +144,8 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
     <dl className="metric-list device-state-list">
       <div><dt>设备连接 / 数据</dt><dd>{!flags ? '未知' : flags.connected ? '在线' : '离线'} / {state ? fresh ? '新鲜' : '过期' : '未收到'}</dd></div>
       <div><dt>{kind === 'm2006' ? '软件运行授权' : '反馈使能'}</dt><dd>{!flags ? '未知' : flags.enablePending ? '待使能反馈确认' : confirmedEnabled ? '已确认' : '未使能 / 未全部确认'}</dd></div>
-      {kind !== 'chassis' && <div><dt>软件零点 / 运动约束</dt><dd>{flags ? `${flags.zeroed ? '已建立' : '未建立'} / ${kind === 'm2006' ? '固定范围 0…360 deg' : flags.limitsConfigured ? '已配置' : '未配置'}` : '未知'}</dd></div>}
-      <div><dt>设备状态</dt><dd>{!flags ? '未知' : flags.fault ? '故障' : flags.enablePending ? '等待使能确认' : flags.busy ? '运动 / 命令忙' : kind === 'chassis' ? '速度模式' : flags.connected && fresh && flags.motionComplete ? '反馈报告运动完成' : '空闲；未确认到位'}</dd></div>
+      {(kind === 'linear' || kind === 'joint') && <div><dt>软件零点 / 运动约束</dt><dd>{flags ? `${flags.zeroed ? '已建立' : '未建立'} / ${flags.limitsConfigured ? '已配置' : '未配置'}` : '未知'}</dd></div>}
+      <div><dt>设备状态</dt><dd>{!flags ? '未知' : flags.fault ? '故障' : flags.enablePending ? '等待使能确认' : flags.busy ? kind === 'm2006' ? '命令忙' : '运动 / 命令忙' : kind === 'chassis' || kind === 'm2006' ? '速度模式' : flags.connected && fresh && flags.motionComplete ? '反馈报告运动完成' : '空闲；未确认到位'}</dd></div>
       {chassis && <div><dt>在线 / 使能 / 故障掩码</dt><dd className="mono">{hexId(chassis.onlineMask)} / {hexId(chassis.enabledMask)} / {hexId(chassis.faultMask)}</dd></div>}
       {motor && motor.motorState != null && <div><dt>原始 DM 状态 / 待处理命令</dt><dd className="mono">{motor.motorState} / {motor.pendingCommand ?? '—'}</dd></div>}
       <div><dt>最近设备结果</dt><dd>{state ? resultName(state.lastResult) : '—'}</dd></div>
@@ -155,11 +155,11 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
     <div className="actions">
       <button type="button" className="button primary" disabled={!canEnable} onClick={() => { if (canEnable) void send(Opcode.Enable, '使能'); }}>明确使能</button>
       <button type="button" className="button" disabled={!canSafetyAction} onClick={() => void send(Opcode.Disable, '失能')}>失能</button>
-      <button type="button" className="button danger" disabled={!canSafetyAction} onClick={() => void send(Opcode.Stop, kind === 'chassis' ? '零速停止' : '停止 / 保持')}>{kind === 'chassis' ? '零速停止' : '停止 / 保持'}</button>
+      <button type="button" className="button danger" disabled={!canSafetyAction} onClick={() => void send(Opcode.Stop, kind === 'chassis' || kind === 'm2006' ? '零速停止' : '停止 / 保持')}>{kind === 'chassis' || kind === 'm2006' ? '零速停止' : '停止 / 保持'}</button>
     </div>
-    <p className="muted">{kind === 'chassis' ? '停止将车体系速度设零，保持使能，不锁定位置。使能需四轮新反馈全部确认；下位机检查四轮失能与静止。' : '停止取消轨迹并保持当前位置，仍可能产生力矩；失能 ACK 也不是物理停机证明。'}</p>
-    {flags?.fault && <p className="notice danger">{kind === 'm2006' ? 'M2006 故障锁存：先失能、静止稳定，再明确设置软件零点清除故障，之后才能使能。' : '先排除实际故障源并确认失能；允许明确使能重试，不会自动清故障或续跑。'}</p>}
-    {!canEnable && available && !flags?.fault && <p className="muted">使能需失能反馈、无待处理命令{kind === 'chassis' ? '、四轮在线且无轮故障。' : kind === 'm2006' ? '、已建立零点；不依赖 DM 的限值标志。' : '、已建立零点、已配置约束及静止反馈。'}</p>}
+    <p className="muted">{kind === 'chassis' ? '停止将车体系速度设零，保持使能，不锁定位置。使能需四轮新反馈全部确认；下位机检查四轮失能与静止。' : kind === 'm2006' ? '停止将目标与速度参考设为 0 rpm，保持软件授权，不保持位置；失能清除目标与 PID 状态。软件停止不是物理停机证明。' : '停止取消轨迹并保持当前位置，仍可能产生力矩；失能 ACK 也不是物理停机证明。'}</p>
+    {flags?.fault && <p className="notice danger">{kind === 'm2006' ? 'M2006 故障锁存：先排除故障并失能，连接与主机链路恢复后，等待 50 个新的低速反馈帧稳定静止，再点击明确使能。下位机按查询静止阈值检查；不需设零，不会自动恢复旧目标。' : '先排除实际故障源并确认失能；允许明确使能重试，不会自动清故障或续跑。'}</p>}
+    {!canEnable && available && !flags?.fault && <p className="muted">使能需失能反馈、无待处理命令{kind === 'chassis' ? '、四轮在线且无轮故障。' : kind === 'm2006' ? '、已查询有效参数及静止反馈；下位机要求 50 个新的低速反馈帧，不依赖零点。' : '、已建立零点、已配置约束及静止反馈。'}</p>}
 
     {kind === 'chassis' ? <section className="parameter-section" aria-labelledby={`${prefix}-body-title`}>
       <h3 id={`${prefix}-body-title`}>车体系速度目标</h3>
@@ -172,11 +172,19 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
         </div>
         <div className="actions"><button type="submit" className="button primary" disabled={!canMove || !speedValid}>应用速度</button></div>
       </form>
-      <p className="notice warning">已确认固件上限：|vx| ≤ 0.1 m/s、|vy| ≤ 0.1 m/s、|wz| ≤ 10 deg/s、轮速 ≤ 30 rpm。超限拒绝，不自动缩放；实际轮向需架空验证。</p>
+      <p className="notice warning">配套新固件合成平移速度 ≤ 1 m/s、|wz| ≤ 360 deg/s、轮速 ≤ 360 rpm；平移与旋转共同受保守轮速包络限制，超限拒绝不缩放。旧固件仍按查询出的较小上限及几何参数操作；未知或无效几何参数禁止发送。</p>
       <dl className="metric-list">
         <div><dt>查询上限 vx / vy / wz / 轮速</dt><dd className="mono">{format(body?.maxVx)} / {format(body?.maxVy)} / {format(body?.maxWz)} / {format(body?.maxWheelRpm)}</dd></div>
         <div><dt>轮半径 / X / Y 距离 · mm</dt><dd className="mono">{format(body?.radiusMm)} / {format(body?.distanceXmm)} / {format(body?.distanceYmm)}</dd></div>
       </dl>
+    </section> : kind === 'm2006' ? <section className="parameter-section" aria-labelledby={`${prefix}-speed-title`}>
+      <h3 id={`${prefix}-speed-title`}>输出轴速度目标</h3>
+      <form onSubmit={event => { event.preventDefault(); if (canMove && targetValid) void send(Opcode.MotorVelocity, '输出轴速度目标', [target]); }}>
+        {field('target', '输出轴速度 · rpm', motor?.target, lower, upper)}
+        <p className="muted">{maxRpm === null ? '尚未查询到有效 maxRPM；刷新参数后才允许提交速度目标。' : `查询允许范围 −${format(maxRpm)} … +${format(maxRpm)} rpm；正负速度可直接更新，超限拒绝。`}</p>
+        <div className="actions"><button type="submit" className="button primary" disabled={!canMove || !targetValid}>发送速度目标</button></div>
+      </form>
+      <p className="muted">直接速度 PID，无位置目标或速度规划。使能与故障恢复均从 0 rpm 开始；位置角度仅供诊断。</p>
     </section> : <>
       <section className="parameter-section" aria-labelledby={`${prefix}-move-title`}>
         <h3 id={`${prefix}-move-title`}>绝对位置目标</h3>
@@ -185,7 +193,7 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
           <p className="muted">{kind === 'linear' ? '无软件行程上下限；只接受有限且可编码的数值。' : `允许范围 ${format(lower)} … ${format(upper)} deg；不是增量，不取最短角。`}</p>
           <div className="actions"><button type="submit" className="button primary" disabled={!canMove || !targetValid}>发送位置目标</button></div>
         </form>
-        {kind === 'linear' && <p className="notice warning">226.2 mm/输出轴圈是换算比例，不是可用行程。当前协议原点附近仅约 ±23.434 mm 可编码；软件设零会移动原点，剩余正负行程未必对称。下位机拒绝不可编码目标，不截断。</p>}
+        {kind === 'linear' && <p className="notice warning">226.2 mm/输出轴圈是换算比例，不是可用行程。可编码范围由匹配的电机端/固件 PMAX 和当前软件零点决定；本版位置伸缩 PMAX=125 时协议原点附近约 ±234.34 mm。电机端须同步125，仍为12.5时禁止按新配置运动；下位机拒绝不可编码目标，不截断。</p>}
       </section>
       <section className="parameter-section" aria-labelledby={`${prefix}-zero-title`}>
         <h3 id={`${prefix}-zero-title`}>软件零点</h3>
@@ -222,17 +230,13 @@ function DevicePanel({ device, ready, busy, fresh, onCommand, onRefresh }: Devic
       <dl className="metric-list">
         <div><dt>速度 PID · Kp / Ki / Kd</dt><dd className="mono">{format(dji?.velocityPid.kp)} / {format(dji?.velocityPid.ki)} / {format(dji?.velocityPid.kd)}</dd></div>
         <div><dt>速度 PID 输出上限 · C610 指令</dt><dd className="mono">{format(dji?.velocityPid.outputMax)}</dd></div>
-        <div><dt>位置 PD · Kp / Kd / 输出上限 deg/s</dt><dd className="mono">{format(dji?.positionPd.kp)} / {format(dji?.positionPd.kd)} / {format(dji?.positionPd.outputMax)}</dd></div>
-        <div><dt>轨迹速度 · deg/s</dt><dd className="mono">{format(dji?.profile.maxVelocity)}</dd></div>
-        <div><dt>轨迹加速度 · deg/s²</dt><dd className="mono">{format(dji?.profile.maxAcceleration)}</dd></div>
-        <div><dt>轨迹 jerk · deg/s³</dt><dd className="mono">{format(dji?.profile.maxJerk)}</dd></div>
-        <div><dt>完成阈值 · deg</dt><dd className="mono">{format(dji?.finish)}</dd></div>
+        <div><dt>最大输出轴转速 · rpm</dt><dd className="mono">±{format(dji?.maxRpm)}</dd></div>
         <div><dt>静止阈值 · rpm</dt><dd className="mono">{format(dji?.stationaryRpm)}</dd></div>
       </dl>
-      <p className="muted">C610 电流指令不是电源输入电流测量，也不是安全保证。不公开的力矩和轨迹位置不伪造显示。</p>
+      <p className="muted">C610 电流指令不是电源输入电流测量，也不是安全保证。不公开的力矩不伪造显示。</p>
     </details>}
 
-    {showZero && <ZeroConfirmation name={`${definition.name} · ${hexId(id)}`} kind={kind} canConfirm={canZero}
+    {showZero && (kind === 'linear' || kind === 'joint') && <ZeroConfirmation name={`${definition.name} · ${hexId(id)}`} kind={kind} canConfirm={canZero}
       reason={zeroReason} busy={pending} error={notice?.error ? notice.text : null} onCancel={() => setShowZero(false)}
       onConfirm={() => { if (canZero) void send(Opcode.SetZero, '软件设零'); }} />}
   </section>;
@@ -278,7 +282,7 @@ function ZeroConfirmation({ name, kind, canConfirm, reason, busy, error, onCance
       <div id={description}>
         <p><strong>{name}</strong></p>
         <p>这不是移动到原点。当前物理位置将成为新的软件 0，旧目标失效，允许操作的实际物理区域随之改变。</p>
-        <p>{kind === 'joint' ? '关节工作区将重新以当前位置为中心建立 −180…+180 deg；此前较小的软件范围会重置。完整范围不可编码时设备拒绝，保留旧零点。' : kind === 'm2006' ? 'M2006 工作区变为从当前位置起 0…360 deg；故障锁存仅在满足条件且明确设零后清除。' : '伸缩只改变毫米原点，不建立软件行程限位；协议可编码区域仍有限，正负剩余行程未必对称。'}</p>
+        <p>{kind === 'joint' ? '关节工作区将重新以当前位置为中心建立 −180…+180 deg；此前较小的软件范围会重置。完整范围不可编码时设备拒绝，保留旧零点。' : '伸缩只改变毫米原点，不建立软件行程限位；协议可编码区域仍有限，正负剩余行程未必对称。'}</p>
         <p className="notice warning">确认整个新工作区无机械碰撞风险。操作不写电机零点寄存器或 Flash，不会自动运动或使能。</p>
         <p className="muted">{canConfirm ? '当前反馈满足连接、新鲜、失能及低速条件；下位机仍需检查静止稳定样本。' : reason}</p>
         <p className="muted" role="status">{busy ? '请求处理中。关闭窗口不会撤销已发送的命令。' : '只有再次点击确认才会发送 SetZero。'}</p>

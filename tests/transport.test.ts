@@ -1,10 +1,42 @@
 import { afterEach, beforeEach, describe, mock, test, type Mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { ProtocolDemo } from '../src/lib/demo';
-import { BROADCAST, DEVICES, Opcode, decodeFrame, type Response } from '../src/lib/protocol';
+import { BROADCAST, DEVICES, Opcode, calcCrc16, decodeFrame, encodeRequest, BODY_LIMITS, bodyVelocityWithinLimits, type Response } from '../src/lib/protocol';
 import { TransportManager } from '../src/lib/transport';
 import type { ConnectionState } from '../src/store/atoms';
 
+test('保守包络使用查询较小上限与几何参数，未知几何关闭手动许可', () => {
+  assert.equal(bodyVelocityWithinLimits({ vx: .4, vy: 0, wz: 360 }), true);
+  assert.equal(bodyVelocityWithinLimits({ vx: 1, vy: 0, wz: 360 }), false);
+  const legacy = { ...BODY_LIMITS, maxWz: 10, maxWheelRpm: 160 };
+  assert.equal(bodyVelocityWithinLimits({ vx: .4, vy: 0, wz: 10 }, legacy), true);
+  assert.equal(bodyVelocityWithinLimits({ vx: 0, vy: 0, wz: 11 }, legacy), false);
+  assert.equal(bodyVelocityWithinLimits({ vx: 1, vy: 0, wz: 0 }, { ...BODY_LIMITS, radiusMm: 1 }), false);
+  for (const radiusMm of [0, -1, NaN, Infinity]) assert.equal(bodyVelocityWithinLimits({ vx: 0, vy: 0, wz: 0 }, { ...BODY_LIMITS, radiusMm }), false);
+  assert.equal(bodyVelocityWithinLimits({ vx: 0, vy: 0, wz: 0 }, null), false);
+});
+
+test('演示底盘接受纯平移、纯旋转及手柄组合；拒绝超包络并保留旧目标', () => {
+  const demo = new ProtocolDemo(); let sequence = 1;
+  const request = (opcode: number, values: number[] = []) => decodeFrame(demo.handle(encodeRequest(sequence++, opcode, 0x40, values))[0]);
+  const parameters = request(Opcode.Parameters);
+  assert.equal(parameters.type, 'chassis-parameters');
+  if (parameters.type === 'chassis-parameters') {
+    assert.equal(bodyVelocityWithinLimits({ vx: 1, vy: 0, wz: 0 }, parameters), true);
+    assert.equal(bodyVelocityWithinLimits({ vx: 0, vy: 0, wz: 360 }, parameters), true);
+    assert.equal(bodyVelocityWithinLimits({ vx: .4, vy: 0, wz: 360 }, parameters), true);
+    assert.equal(bodyVelocityWithinLimits({ vx: 1, vy: 0, wz: 360 }, parameters), false);
+  }
+  assert.equal(request(Opcode.Enable).result, 0);
+  for (const values of [[1, 0, 0], [0, 0, 360], [.4, 0, 360]]) assert.equal(request(Opcode.BodyVelocity, values).result, 0);
+  assert.equal(request(Opcode.BodyVelocity, [1, 0, 360]).result, 6);
+  const state = request(Opcode.State);
+  assert.equal(state.type, 'chassis-state');
+  if (state.type === 'chassis-state') {
+    assert.deepEqual(state.target, { vx: Math.fround(.4), vy: 0, wz: 360 });
+    assert.equal(state.lastResult, 6);
+  }
+});
 let now = 0;
 let windowTimerCalls = 0;
 let requestedPort: SerialBoundary;
@@ -72,6 +104,22 @@ function harness() {
 function settle<T>(promise: Promise<T>) {
   return promise.then(value => ({ value, error: null }), error => ({ value: undefined, error: error as Error }));
 }
+function editReply(frame: Uint8Array, change: (view: DataView, bytes: Uint8Array) => void) {
+  const bytes = frame.slice(), view = new DataView(bytes.buffer);
+  change(view, bytes); view.setUint16(62, calcCrc16(bytes, 62), true);
+  return bytes;
+}
+async function startRemote(h: { manager: TransportManager }) {
+  await h.manager.connect('web-serial');
+  const starting = h.manager.startGamepadControl();
+  h.manager.updateGamepadControl({ vx: 0, vy: 0, wz: 0 });
+  await starting;
+  assert.equal(h.manager.getGamepadState().phase, 'active');
+}
+function velocityOf(write: WriteRecord) {
+  const view = new DataView(write.bytes.buffer, write.bytes.byteOffset);
+  return [view.getFloat32(12, true), view.getFloat32(16, true), view.getFloat32(20, true)];
+}
 
 beforeEach(() => {
   now = 0; windowTimerCalls = 0;
@@ -94,6 +142,24 @@ afterEach(async () => {
     else Reflect.deleteProperty(globalThis, name);
   }
   originalGlobals.clear();
+});
+
+test('浏览器拒绝蓝牙直连不关闭现有串口、不申请新授权，会话时钟继续工作', async () => {
+  const h = harness();
+  const requestPort = mock.fn(async () => h.port);
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { serial: { requestPort } } });
+  const close = mock.method(h.port, 'close');
+  await h.manager.connect('web-serial');
+  const status = h.status, worker = latestWorker(), writes = h.port.writes.length;
+  await assert.rejects(h.manager.connect('bluetooth', 'AA:BB:CC:DD:EE:FF'), /浏览器不支持经典蓝牙/);
+  assert.equal(requestPort.mock.callCount(), 1);
+  assert.equal(close.mock.callCount(), 0);
+  assert.strictEqual(h.status, status);
+  assert.equal(worker.terminated, false);
+  await tick(worker, 120);
+  assert.equal(h.status.phase, 'ready');
+  assert.equal(h.status.mode, 'web-serial');
+  assert.ok(h.port.writes.length > writes);
 });
 
 describe('连接专属 Worker 通信时钟', () => {
@@ -301,5 +367,344 @@ describe('连接专属 Worker 通信时钟', () => {
     assert.equal(h.port.writes.length, 0);
     assert.equal(revokeSpy.mock.callCount(), 1);
     assert.equal(ControlledWorker.instances.length, 0);
+  });
+});
+
+describe('手柄单槽调度与安全退出', () => {
+  test('旧 10 deg/s / 160 rpm 固件禁止开启手柄', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    h.port.filter = (replies, request) => request[6] === Opcode.Parameters ? replies.map(reply => editReply(reply, view => {
+      view.setFloat32(22, 10, true); view.setFloat32(26, 160, true);
+    })) : replies;
+    await assert.rejects(h.manager.startGamepadControl(), /固件版本或速度限制不匹配/);
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+    assert.equal(h.port.writes.some(write => write.bytes[6] === Opcode.Enable), false);
+  });
+
+  test('0.4 m/s 固件可开启手柄，外部目标保持 1 m/s 并拒绝超包络组合', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    h.port.filter = (replies, request) => request[6] === Opcode.Parameters ? replies.map(reply => editReply(reply, view => {
+      view.setFloat32(14, .4, true); view.setFloat32(18, .4, true);
+    })) : replies;
+    await h.manager.startGamepadControl();
+    for (const target of [{ vx: 1, vy: 0, wz: 0 }, { vx: 0, vy: 0, wz: 360 }, { vx: .4, vy: 0, wz: 360 }]) {
+      assert.doesNotThrow(() => h.manager.updateGamepadControl(target));
+    }
+    assert.throws(() => h.manager.updateGamepadControl({ vx: 1, vy: 0, wz: 360 }), /无效/);
+    await flushMessages();
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+  });
+  test('参数核对后只使能底盘，ACK 不代替四轮实际状态', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    const start = h.port.writes.length;
+    h.port.filter = (replies, request) => request[6] === Opcode.State && request[7] === 0x40 ? [] : replies;
+    const starting = h.manager.startGamepadControl();
+    assert.equal(h.manager.getGamepadState().phase, 'enabling');
+    h.manager.updateGamepadControl({ vx: 0, vy: 0, wz: 0 }); await flushMessages();
+    const state = h.port.writes.at(-1)!;
+    assert.deepEqual(h.port.writes.slice(start).map(write => [write.bytes[6], write.bytes[7]]), [
+      [Opcode.Parameters, 0x40], [Opcode.Enable, 0x40], [Opcode.State, 0x40],
+    ]);
+    h.manager.updateGamepadControl({ vx: .2, vy: 0, wz: 2 }); await tick(latestWorker(), 100);
+    assert.equal(h.manager.getGamepadState().phase, 'enabling');
+    assert.equal(h.port.writes.some(write => write.bytes[6] === Opcode.BodyVelocity), false);
+    h.port.reply(state.replies[0]); await flushMessages(); await starting;
+    assert.equal(h.manager.getGamepadState().phase, 'active');
+    await tick(latestWorker(), 0);
+    assert.deepEqual(velocityOf(h.port.writes.at(-1)!).map(value => Number(value.toFixed(3))), [.2, 0, 2]);
+  });
+
+  test('旧固件速度限制禁止 Enable 和满幅速度', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    const start = h.port.writes.length;
+    h.port.filter = (replies, request) => request[6] === Opcode.Parameters && request[7] === 0x40
+      ? replies.map(reply => editReply(reply, view => { view.setFloat32(14, .1, true); view.setFloat32(18, .1, true); view.setFloat32(26, 30, true); })) : replies;
+    const result = await settle(h.manager.startGamepadControl());
+    assert.match(result.error!.message, /固件版本或速度限制/);
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+    assert.deepEqual(h.port.writes.slice(start).map(write => write.bytes[6]), [Opcode.Parameters]);
+  });
+
+  test('pending 状态保持 enabling，持续输入也不能越过 600ms 反馈期限', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    h.port.filter = (replies, request) => request[6] === Opcode.State ? replies.map(reply => reply[7] === 0x40
+      ? editReply(reply, (view, bytes) => { view.setUint16(14, 1 | 16, true); bytes[53] = 0; }) : reply) : replies;
+    await h.manager.startGamepadControl();
+    assert.equal(h.manager.getGamepadState().phase, 'enabling');
+    for (let i = 0; i < 6; i++) { h.manager.updateGamepadControl({ vx: 0, vy: 0, wz: 0 }); await tick(latestWorker(), 100); }
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+    assert.equal(h.port.writes.some(write => write.bytes[6] === Opcode.BodyVelocity), false);
+    assert.ok(h.port.writes.some(write => write.bytes[6] === Opcode.Disable && write.bytes[7] === BROADCAST));
+  });
+
+  test('长时间忙时只覆盖最新输入，不积累旧速度且保留比例幅度', async () => {
+    const h = harness(); await startRemote(h);
+    h.port.filter = (replies, request) => request[6] === Opcode.Parameters ? [] : replies;
+    const query = h.manager.queryParameters(0x0a); await flushMessages();
+    const held = h.port.writes.at(-1)!, start = h.port.writes.length;
+    for (let i = 1; i <= 7; i++) {
+      h.manager.updateGamepadControl({ vx: i / 20, vy: 0, wz: -i / 2 }); await tick(latestWorker(), 40);
+    }
+    assert.equal(h.port.writes.slice(start).some(write => write.bytes[6] === Opcode.BodyVelocity), false);
+    h.port.reply(held.replies[0]); await flushMessages(); await query; await tick(latestWorker(), 0);
+    const velocities = h.port.writes.slice(start).filter(write => write.bytes[6] === Opcode.BodyVelocity);
+    assert.equal(velocities.length, 1);
+    assert.deepEqual(velocityOf(velocities[0]).map(value => Number(value.toFixed(3))), [.35, 0, -3.5]);
+  });
+
+  test('100ms 速度间隔且回中只发零速，不主动失能', async () => {
+    const h = harness(); await startRemote(h); const start = h.port.writes.length;
+    for (let i = 0; i < 11; i++) {
+      h.manager.updateGamepadControl({ vx: i < 5 ? .5 : 0, vy: 0, wz: 0 }); await tick(latestWorker(), 20);
+    }
+    const velocities = h.port.writes.slice(start).filter(write => write.bytes[6] === Opcode.BodyVelocity);
+    assert.ok(velocities.length >= 2);
+    for (let i = 1; i < velocities.length; i++) assert.ok(velocities[i].at - velocities[i - 1].at >= 100);
+    assert.deepEqual(velocityOf(velocities.at(-1)!), [0, 0, 0]);
+    assert.equal(h.port.writes.slice(start).some(write => write.bytes[6] === Opcode.Disable), false);
+    assert.equal(h.manager.getGamepadState().phase, 'active');
+  });
+
+  test('250ms 输入过期清排队项，在途之后优先 FF 而非重放旧速度', async () => {
+    const h = harness(); await startRemote(h);
+    h.manager.updateGamepadControl({ vx: .5, vy: 0, wz: 0 }); await tick(latestWorker(), 0);
+    h.port.filter = (replies, request) => request[6] === Opcode.Parameters ? [] : replies;
+    const query = h.manager.queryParameters(0x0a); await flushMessages(); const held = h.port.writes.at(-1)!;
+    const queued = settle(h.manager.queryParameters(0x21));
+    await tick(latestWorker(), 140); await tick(latestWorker(), 110);
+    assert.equal(h.manager.getGamepadState().phase, 'stopping');
+    assert.match((await queued).error!.message, /已取消/);
+    h.port.reply(held.replies[0]); await flushMessages(); await query;
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+    assert.deepEqual(h.port.writes.at(-1)!.bytes.slice(6, 8), Uint8Array.of(Opcode.Disable, BROADCAST));
+    assert.equal(h.port.writes.filter(write => write.bytes[6] === Opcode.BodyVelocity).length, 1);
+  });
+});
+
+describe('手柄失能屏障与连接代次', () => {
+  test('FF 九帧缺一不能宣称关闭，故障逐台保留且同序号重试', async () => {
+    const h = harness(); await startRemote(h);
+    h.port.filter = (replies, request) => request[6] === Opcode.Disable ? replies.slice(0, -1).map((reply, index) => index === 0
+      ? editReply(reply, view => view.setUint16(12, 107, true)) : reply) : replies;
+    const stopping = h.manager.stopGamepadControl('测试退出'); await flushMessages();
+    const disable = h.port.writes.at(-1)!;
+    assert.equal(h.manager.getGamepadState().phase, 'stopping');
+    await tick(latestWorker(), 150);
+    assert.deepEqual(h.port.writes.at(-1)!.bytes, disable.bytes);
+    assert.equal(h.manager.getGamepadState().phase, 'stopping');
+    h.port.reply(disable.replies.at(-1)!); await flushMessages();
+    const replies = await stopping;
+    assert.equal(replies.length, 9); assert.equal(replies[0].result, 107);
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+    assert.match(h.manager.getGamepadState().message, /存在故障/);
+    assert.equal(h.responses.filter(response => response.opcode === Opcode.Disable && response.result === 107).length, 1);
+  });
+
+  test('失能无应答停止整个时钟，不保持旧运动的心跳', async () => {
+    const h = harness(); await startRemote(h);
+    h.port.filter = (replies, request) => request[6] === Opcode.Disable ? [] : replies;
+    const stopping = settle(h.manager.stopGamepadControl()); await flushMessages(); const worker = latestWorker();
+    await tick(worker, 150); await tick(worker, 150);
+    assert.ok((await stopping).error);
+    assert.equal(h.status.phase, 'unresponsive'); assert.equal(worker.terminated, true);
+    assert.match(h.manager.getGamepadState().message, /未确认全体失能/);
+    const end = h.port.writes.length;
+    await tick(worker, 1000); assert.equal(h.port.writes.length, end);
+  });
+
+  test('普通手动动作拒绝，顶栏 FF 取消遥控且下一 tick 不复活', async () => {
+    const h = harness(); await startRemote(h);
+    const refused = await settle(h.manager.command(Opcode.Enable, 0x21));
+    assert.match(refused.error!.message, /请先退出遥控/);
+    const replies = await h.manager.command(Opcode.Disable, BROADCAST);
+    assert.equal(replies.length, 9); assert.equal(h.manager.getGamepadState().phase, 'off');
+    const start = h.port.writes.length;
+    h.manager.updateGamepadControl({ vx: 1, vy: 0, wz: 0 }); await tick(latestWorker(), 100);
+    assert.equal(h.port.writes.slice(start).some(write => write.bytes[6] === Opcode.Enable || write.bytes[6] === Opcode.BodyVelocity), false);
+  });
+
+  test('安全失能打断 manualPending 后续链，不被手动互斥拒绝', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    h.port.filter = (replies, request) => request[6] === Opcode.Enable ? [] : replies;
+    const old = settle(h.manager.command(Opcode.Enable, 0x0a)); await flushMessages();
+    const enable = h.port.writes.at(-1)!;
+    const stop = h.manager.command(Opcode.Disable, BROADCAST);
+    h.port.reply(enable.replies[0]); await flushMessages();
+    assert.match((await old).error!.message, /安全停机取消/);
+    assert.equal((await stop).length, 9);
+    const tail = h.port.writes.slice(h.port.writes.indexOf(enable) + 1);
+    assert.deepEqual(tail.map(write => [write.bytes[6], write.bytes[7]]), [[Opcode.Disable, BROADCAST], [Opcode.State, BROADCAST]]);
+  });
+
+  test('enabling/stopping 均可顶栏失能，旧启动不能使新代次 active', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    h.port.filter = (replies, request) => request[6] === Opcode.Enable || request[6] === Opcode.Disable ? [] : replies;
+    const starting = settle(h.manager.startGamepadControl()); await flushMessages();
+    const enable = h.port.writes.at(-1)!;
+    const stopped = h.manager.command(Opcode.Disable, BROADCAST);
+    const stoppedAgain = h.manager.command(Opcode.Disable, BROADCAST);
+    assert.equal(h.manager.getGamepadState().phase, 'stopping');
+    h.port.reply(enable.replies[0]); await flushMessages();
+    const disable = h.port.writes.at(-1)!;
+    assert.equal(disable.bytes[6], Opcode.Disable);
+    assert.ok((await starting).error);
+    for (const reply of disable.replies) h.port.reply(reply);
+    await flushMessages();
+    assert.equal((await stopped).length, 9); assert.equal((await stoppedAgain).length, 9);
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+    assert.equal(h.port.writes.filter(write => write.bytes[6] === Opcode.Disable).length, 1);
+    h.port.filter = replies => replies;
+    await h.manager.startGamepadControl();
+    assert.equal(h.manager.getGamepadState().phase, 'active');
+  });
+
+  test('断开重连使旧 start 与旧 Worker 失效，不复活新连接遥控', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    h.port.filter = (replies, request) => request[6] === Opcode.Enable ? [] : replies;
+    const starting = settle(h.manager.startGamepadControl()); await flushMessages();
+    const oldWorker = latestWorker(), oldTick = oldWorker.onmessage!;
+    await h.manager.disconnect(); assert.ok((await starting).error);
+    const replacement = requestedPort = new SerialBoundary(); await h.manager.connect('web-serial');
+    const start = replacement.writes.length;
+    oldTick(new MessageEvent('message')); await flushMessages();
+    assert.equal(replacement.writes.length, start); assert.equal(h.manager.getGamepadState().phase, 'off');
+    await h.manager.startGamepadControl(); assert.equal(h.manager.getGamepadState().phase, 'active');
+  });
+
+  test('合成幅度超限拒绝并安全退出，不允许斜推突破 1 m/s', async () => {
+    const h = harness(); await startRemote(h);
+    assert.throws(() => h.manager.updateGamepadControl({ vx: .8, vy: .8, wz: 0 }), /无效/);
+    await flushMessages();
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+    assert.equal(h.port.writes.some(write => write.bytes[6] === Opcode.BodyVelocity), false);
+  });
+});
+
+describe('手柄反馈失效与速度重试边界', () => {
+  test('输入持续有效但底盘真实反馈已满 600ms 时仍退出', async () => {
+    const h = harness(); await startRemote(h);
+    h.port.filter = (replies, request) => request[6] === Opcode.Parameters ? [] : replies;
+    const query = h.manager.queryParameters(0x0a); await flushMessages();
+    now += 600;
+    h.manager.updateGamepadControl({ vx: .2, vy: 0, wz: 1 });
+    h.port.filter = replies => replies;
+    await tick(latestWorker(), 0); await query;
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+    assert.equal(h.port.writes.some(write => write.bytes[6] === Opcode.BodyVelocity), false);
+    assert.ok(h.port.writes.some(write => write.bytes[6] === Opcode.Disable && write.bytes[7] === BROADCAST));
+  });
+
+  test('新反馈四轮故障立即退出，不因 Enable ACK 成功继续发速度', async () => {
+    const h = harness(); await startRemote(h);
+    h.port.filter = (replies, request) => request[6] === Opcode.State ? replies.map(reply => reply[7] === 0x40
+      ? editReply(reply, (view, bytes) => { view.setUint16(14, 1 | 8 | 128, true); bytes[54] = 1; }) : reply) : replies;
+    await h.manager.refresh(); await flushMessages();
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+    assert.ok(h.port.writes.some(write => write.bytes[6] === Opcode.Disable && write.bytes[7] === BROADCAST));
+  });
+
+  test('未应答速度动作绝不重发旧目标，关闭通信时钟等待下位机停用', async () => {
+    const h = harness(); await startRemote(h);
+    h.port.filter = (replies, request) => request[6] === Opcode.BodyVelocity ? [] : replies;
+    h.manager.updateGamepadControl({ vx: .5, vy: 0, wz: 1 });
+    await tick(latestWorker(), 0);
+    h.manager.updateGamepadControl({ vx: .1, vy: 0, wz: 0 });
+    await tick(latestWorker(), 150);
+    assert.equal(h.port.writes.filter(write => write.bytes[6] === Opcode.BodyVelocity).length, 1);
+    assert.equal(h.status.phase, 'unresponsive');
+    assert.equal(latestWorker().terminated, true);
+    assert.equal(h.manager.getGamepadState().phase, 'off');
+  });
+});
+
+describe('M2006 输出轴速度契约', () => {
+  test('速度持续跨越整圈，可直接反向更新；停止归零但保持使能，失能不恢复旧目标', () => {
+    const demo = new ProtocolDemo(); let sequence = 0;
+    const send = (opcode: number, values: number[] = []) => decodeFrame(demo.handle(encodeRequest(++sequence, opcode, 0x21, values))[0]);
+    const state = () => { const response = send(Opcode.State); if (response.type !== 'motor-state') throw new Error('缺少电机状态'); return response; };
+    assert.equal(send(Opcode.Enable).result, 0);
+    assert.equal(send(Opcode.MotorVelocity, [300]).result, 0);
+    let moving = state();
+    for (let i = 0; i < 5; i++) { now += 200; moving = state(); }
+    assert.ok(moving.position > 360);
+    assert.equal(moving.unit, 'rpm'); assert.equal(moving.target, 300);
+    assert.equal(moving.velocity, 300); assert.equal(moving.referenceVelocity, 300); assert.equal(moving.reference, null);
+    assert.equal(moving.flags.busy, false); assert.equal(moving.flags.motionComplete, false);
+    assert.equal(moving.flags.zeroed, false); assert.equal(moving.flags.limitsConfigured, false);
+    assert.equal(send(Opcode.MotorVelocity, [-300]).result, 0);
+    now += 200; const reversing = state(); assert.ok(reversing.position < moving.position); assert.equal(reversing.velocity, -300);
+    assert.equal(send(Opcode.Stop).result, 0);
+    const stopped = state(); assert.equal(stopped.flags.enabled, true); assert.equal(stopped.target, 0); assert.equal(stopped.velocity, 0);
+    now += 200; assert.equal(state().position, stopped.position);
+    assert.equal(send(Opcode.MotorVelocity, [120]).result, 0);
+    assert.equal(send(Opcode.Disable).result, 0);
+    assert.equal(state().flags.enabled, false); assert.equal(state().target, 0); assert.equal(state().referenceVelocity, 0);
+    assert.equal(send(Opcode.MotorVelocity, [30]).result, 3);
+    now += 100; assert.equal(send(Opcode.Enable).result, 0); assert.equal(state().target, 0);
+  });
+
+  test('速度范围与非有限请求拒绝且保留有效参考，旧位置命令不能驱动速度设备', () => {
+    const demo = new ProtocolDemo(); let sequence = 0;
+    const send = (opcode: number, id = 0x21, values: number[] = []) => decodeFrame(demo.handle(encodeRequest(++sequence, opcode, id, values))[0]);
+    send(Opcode.Enable); assert.equal(send(Opcode.MotorVelocity, 0x21, [100]).result, 0);
+    for (const rpm of [-300.01, 300.01]) assert.equal(send(Opcode.MotorVelocity, 0x21, [rpm]).result, 6);
+    for (const rpm of [NaN, Infinity, -Infinity]) {
+      assert.throws(() => encodeRequest(++sequence, Opcode.MotorVelocity, 0x21, [rpm]));
+      const malformed = editReply(encodeRequest(++sequence, Opcode.MotorVelocity, 0x21, [0]), view => view.setFloat32(12, rpm, true));
+      assert.equal(decodeFrame(demo.handle(malformed)[0]).result, 5);
+    }
+    assert.equal(send(Opcode.Move, 0x21, [90]).result, 105); assert.equal(send(Opcode.SetZero).result, 105);
+    for (const id of [0x0a, 0x40]) assert.equal(send(Opcode.MotorVelocity, id, [90]).result, 105);
+    const state = send(Opcode.State); if (state.type !== 'motor-state') throw new Error('缺少电机状态');
+    assert.equal(state.target, 100); assert.equal(state.referenceVelocity, 100);
+  });
+
+  test('新参数六字段，拒绝旧 kind3、角度单位与50字节位置参数', () => {
+    const demo = new ProtocolDemo();
+    const info = demo.handle(encodeRequest(1, Opcode.Info, BROADCAST))[0];
+    assert.throws(() => decodeFrame(editReply(info, (_, bytes) => { bytes[39] = bytes[40] = 3; })));
+    const parameters = demo.handle(encodeRequest(2, Opcode.Parameters, 0x21))[0];
+    const decoded = decodeFrame(parameters); if (decoded.type !== 'dji-parameters') throw new Error('缺少速度参数');
+    assert.equal(decoded.maxRpm, 300); assert.equal(decoded.stationaryRpm, Math.fround(.1));
+    assert.equal('positionPd' in decoded, false); assert.equal('profile' in decoded, false); assert.equal('finish' in decoded, false);
+    assert.throws(() => decodeFrame(editReply(parameters, view => view.setUint16(8, 50, true))));
+    const state = demo.handle(encodeRequest(3, Opcode.State, 0x21))[0];
+    for (const change of [(bytes: Uint8Array) => { bytes[16] = 3; }, (bytes: Uint8Array) => { bytes[17] = 1; }]) {
+      assert.throws(() => decodeFrame(editReply(state, (_, bytes) => change(bytes))));
+    }
+  });
+
+  test('失联清目标并锁存；心跳不会自动复活，静止反馈后显式使能恢复零速度', () => {
+    const demo = new ProtocolDemo(); let sequence = 0;
+    const send = (opcode: number, values: number[] = [], id = 0x21) => decodeFrame(demo.handle(encodeRequest(++sequence, opcode, id, values))[0]);
+    const state = () => { const response = send(Opcode.State); if (response.type !== 'motor-state') throw new Error('缺少电机状态'); return response; };
+    send(Opcode.Enable); send(Opcode.MotorVelocity, [200]); now += 500;
+    const fault = state(); assert.equal(fault.flags.fault, true); assert.equal(fault.flags.enabled, false); assert.equal(fault.target, 0);
+    assert.equal(send(Opcode.Enable).result, 107);
+    send(Opcode.Heartbeat, [], BROADCAST); assert.equal(state().flags.fault, true);
+    assert.equal(send(Opcode.Disable).result, 0); assert.equal(send(Opcode.Enable).result, 7);
+    now += 100; assert.equal(state().flags.enabled, false);
+    assert.equal(send(Opcode.Enable).result, 0); const recovered = state();
+    assert.equal(recovered.flags.fault, false); assert.equal(recovered.target, 0); assert.equal(recovered.velocity, 0);
+  });
+
+  test('旧kind3固件握手不可进入ready', async () => {
+    const h = harness();
+    h.port.filter = (replies, request) => request[6] === Opcode.Info ? replies.map(reply => editReply(reply, (_, bytes) => { bytes[39] = bytes[40] = 3; })) : replies;
+    const connection = settle(h.manager.connect('web-serial')); await flushMessages();
+    const worker = latestWorker(); await tick(worker, 150); await tick(worker, 150);
+    assert.ok((await connection).error); assert.notEqual(h.status.phase, 'ready');
+    assert.equal(h.port.writes.some(write => write.bytes[6] === Opcode.MotorVelocity), false);
+  });
+
+  test('网页手动速度成功发0x28，未获ACK不重发旧速度', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    await h.manager.command(Opcode.Enable, 0x21);
+    const accepted = await h.manager.command(Opcode.MotorVelocity, 0x21, [-120]); assert.equal(accepted[0].result, 0);
+    h.port.filter = (replies, request) => request[6] === Opcode.MotorVelocity ? [] : replies;
+    const start = h.port.writes.length, pending = settle(h.manager.command(Opcode.MotorVelocity, 0x21, [80]));
+    await flushMessages(); await tick(latestWorker(), 150);
+    assert.ok((await pending).error); assert.equal(h.port.writes.slice(start).filter(write => write.bytes[6] === Opcode.MotorVelocity).length, 1);
+    assert.equal(h.status.phase, 'unresponsive');
   });
 });

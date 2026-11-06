@@ -1,10 +1,11 @@
 import { atom } from 'jotai';
 import { DEVICES, type DeviceDefinition, type DeviceState, type DeviceParameters, type Info } from '../lib/protocol';
-export type TransportMode = 'tauri' | 'web-serial' | 'demo';
+export type TransportMode = 'tauri' | 'bluetooth' | 'web-serial' | 'demo';
 export type ConnectionPhase = 'disconnected' | 'opening' | 'handshaking' | 'ready' | 'unresponsive' | 'incompatible';
 export type LogLevel = 'tx' | 'rx' | 'info' | 'warn' | 'error';
 export interface LogEntry { id: number; time: number; level: LogLevel; message: string; rawHex?: string }
 export interface SerialPortInfo { portName: string; label: string; portType: string; manufacturer?: string; product?: string }
+export interface BluetoothDeviceInfo { address: string; name: string; connected: boolean }
 export interface PlatformInfo { isTauri: boolean; hasWebSerial: boolean; os: string; arch: string }
 export interface ConnectionState {
   mode: TransportMode; phase: ConnectionPhase; portOpen: boolean; portName: string; message: string; lastRxAt: number;

@@ -639,13 +639,14 @@ dependencies = [
 
 [[package]]
 name = "dm-debug-station"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "serialport",
  "tauri",
  "tauri-build",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
