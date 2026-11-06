@@ -60,7 +60,6 @@ struct ParameterSpec {
     unit: &'static str,
     primary: String,
     mirrors: Vec<String>,
-    optional: bool,
 }
 
 fn root(device_id: u32) -> Result<String, String> {
@@ -74,41 +73,31 @@ fn root(device_id: u32) -> Result<String, String> {
 fn catalog(device_id: u32) -> Result<Vec<ParameterSpec>, String> {
     let root = root(device_id)?;
     let mut specs = Vec::new();
-    let mut add = |key, label, unit, primary: String, mirror: Option<String>, optional| {
+    let mut add = |key, label, unit, primary: String, mirror: Option<String>| {
         specs.push(ParameterSpec { key, label, unit, primary: format!("{root}->{primary}"),
-            mirrors: mirror.into_iter().map(|field| format!("{root}->{field}")).collect(), optional });
+            mirrors: mirror.into_iter().map(|field| format!("{root}->{field}")).collect() });
     };
     if device_id < 0x21 {
         for (key, label, unit) in [
             ("kp", "位置Kp", ""), ("kd", "速度Kd", ""), ("torque_ff_nm", "前馈扭矩", "N·m"),
             ("finish_deg", "到位阈值", "deg"), ("stationary_rpm", "静止阈值", "rpm"),
-        ] { add(key, label, unit, format!("control_.{key}"), None, false); }
+        ] { add(key, label, unit, format!("control_.{key}"), None); }
         for (key, label, unit) in [
             ("min_deg", "最小位置", "deg"), ("max_deg", "最大位置", "deg"),
             ("max_velocity_deg_s", "最大速度", "deg/s"), ("max_acceleration_deg_s2", "最大加速度", "deg/s²"),
             ("max_jerk_deg_s3", "最大加加速度", "deg/s³"),
         ] {
             if matches!(device_id, 0x0d | 0x0f) || !matches!(key, "min_deg" | "max_deg") {
-                add(key, label, unit, format!("limits_.{key}"), Some(key.to_string()), false);
+                add(key, label, unit, format!("limits_.{key}"), Some(key.to_string()));
             }
         }
     } else {
-        let trajectory = "trajectory_._M_payload._M_payload._M_value";
         for (key, label, field) in [
             ("velocity_kp", "速度Kp", "Kp"), ("velocity_ki", "速度Ki", "Ki"),
             ("velocity_kd", "速度Kd", "Kd"), ("velocity_output_max", "速度输出限幅", "abs_output_max"),
-        ] { add(key, label, "", format!("controller_.pid_.cfg_.{field}"), Some(format!("config_.velocity_pid.{field}")), false); }
-        for (key, label, field) in [
-            ("position_kp", "位置Kp", "Kp"), ("position_kd", "位置Kd", "Kd"),
-            ("position_output_max", "位置输出限幅", "abs_output_max"),
-        ] { add(key, label, "", format!("{trajectory}.pd_[0].cfg_.{field}"), Some(format!("config_.position_pd.{field}")), true); }
-        for (key, label, unit, field) in [
-            ("profile_max_spd", "轨迹最大速度", "deg/s", "max_spd"),
-            ("profile_max_acc", "轨迹最大加速度", "deg/s²", "max_acc"),
-            ("profile_max_jerk", "轨迹最大加加速度", "deg/s³", "max_jerk"),
-        ] { add(key, label, unit, format!("{trajectory}.default_profile_cfg_.{field}"), Some(format!("config_.profile.{field}")), true); }
-        add("finish_deg", "到位阈值", "deg", "config_.finish_deg".into(), Some(format!("{trajectory}.finish_threshold_")), true);
-        add("stationary_rpm", "静止阈值", "rpm", "config_.stationary_rpm".into(), None, false);
+        ] { add(key, label, "", format!("controller_.pid_.cfg_.{field}"), Some(format!("config_.velocity_pid.{field}"))); }
+        add("max_rpm", "最大输出轴转速", "rpm", "config_.max_rpm".into(), None);
+        add("stationary_rpm", "静止阈值", "rpm", "config_.stationary_rpm".into(), None);
     }
     Ok(specs)
 }
@@ -251,15 +240,6 @@ impl Session {
         Ok(())
     }
 
-    fn optional_ready(&mut self, device_id: u32, deadline: Instant) -> Result<(), String> {
-        let expression = format!("{}->trajectory_._M_payload._M_engaged", root(device_id)?);
-        let address = self.address(&expression, 1, deadline)?;
-        if self.evaluate(&format!("Target.ReadU8(0x{address:X})"), deadline)? != 1 {
-            return Err("M2006轨迹对象尚未构造，不能访问其参数；不支持的C++符号布局不会猜测偏移".into());
-        }
-        Ok(())
-    }
-
     fn resolve(&mut self, spec: &ParameterSpec, deadline: Instant) -> Result<OzoneParameter, String> {
         let address = self.address(&spec.primary, 4, deadline)?;
         let mut mirrors = Vec::with_capacity(spec.mirrors.len());
@@ -290,7 +270,6 @@ impl Session {
         let specs = catalog(device_id)?;
         let deadline = Instant::now() + self.timeout;
         let (slot, pointer) = self.target(device_id, deadline)?;
-        if specs.iter().any(|spec| spec.optional) { self.optional_ready(device_id, deadline)?; }
         let mut parameters = Vec::with_capacity(specs.len());
         for spec in &specs {
             let mut parameter = self.resolve(spec, deadline)?;
@@ -305,7 +284,6 @@ impl Session {
     fn write_parameter(&mut self, device_id: u32, spec: &ParameterSpec, value: f32) -> Result<OzoneParameter, String> {
         let deadline = Instant::now() + self.timeout;
         let (slot, pointer) = self.target(device_id, deadline)?;
-        if spec.optional { self.optional_ready(device_id, deadline)?; }
         // 所有实际字段和配置镜像都先通过当前ELF解析、校验，绝不硬编码成员偏移。
         let mut parameter = self.resolve(spec, deadline)?;
         self.verify_root(slot, pointer, deadline)?;
@@ -448,10 +426,6 @@ mod tests {
             symbols.insert(root(device_id).unwrap(), BASE);
             memory.insert(BASE, BASE + 0x1000);
             memory.insert(CPUID, 0x411f_c271);
-            if device_id >= 0x21 {
-                symbols.insert(format!("{}->trajectory_._M_payload._M_engaged", root(device_id).unwrap()), BASE + 0x3000);
-                memory.insert(BASE + 0x3000, 1);
-            }
             for (index, spec) in catalog(device_id).unwrap().into_iter().enumerate() {
                 let address = BASE + 0x2000 + index as u32 * 8;
                 symbols.insert(spec.primary, address);
@@ -575,7 +549,7 @@ mod tests {
             let (state, trace, worker, _) = target_mock(Target::new(id));
             let snapshot = state.read_parameters(id).unwrap();
             assert_eq!(snapshot.device_id, id);
-            assert_eq!(snapshot.parameters.len(), if id >= 0x21 { 12 } else if matches!(id, 0x0d | 0x0f) { 10 } else { 8 });
+            assert_eq!(snapshot.parameters.len(), if id >= 0x21 { 6 } else if matches!(id, 0x0d | 0x0f) { 10 } else { 8 });
             for parameter in &snapshot.parameters {
                 assert_eq!(parameter.value, 1.5);
                 assert!(parameter.mirrors.iter().all(|mirror| mirror.value == 2.5));
@@ -611,40 +585,34 @@ mod tests {
     }
 
     #[test]
-    fn m2006_actual_pid_optional_profile_and_finish_symbols_are_resolved() {
-        let (state, trace, worker, _) = target_mock(Target::new(0x22));
-        for (key, primary, mirror) in [
-            ("velocity_ki", "controller_.pid_.cfg_.Ki", "config_.velocity_pid.Ki"),
-            ("position_kd", "trajectory_._M_payload._M_payload._M_value.pd_[0].cfg_.Kd", "config_.position_pd.Kd"),
-            ("profile_max_spd", "trajectory_._M_payload._M_payload._M_value.default_profile_cfg_.max_spd", "config_.profile.max_spd"),
-            ("finish_deg", "config_.finish_deg", "trajectory_._M_payload._M_payload._M_value.finish_threshold_"),
-        ] {
-            let parameter = state.write_parameter(0x22, key, -0.0, true).unwrap();
-            assert_eq!(parameter.expression, format!("m2006_motors[1]->{primary}"));
-            assert_eq!(parameter.mirrors[0].expression, format!("m2006_motors[1]->{mirror}"));
-            assert_eq!(parameter.value.to_bits(), (-0.0_f32).to_bits());
-            assert_eq!(parameter.mirrors[0].value.to_bits(), (-0.0_f32).to_bits());
+    fn m2006_speed_fields_read_back_primary_and_configuration_values() {
+        let (state, _, worker, _) = target_mock(Target::new(0x22));
+        let snapshot = state.read_parameters(0x22).unwrap();
+        assert_eq!(snapshot.parameters.len(), 6);
+        for parameter in snapshot.parameters {
+            let result = state.write_parameter(0x22, &parameter.key, -0.0, true).unwrap();
+            assert_eq!(result.value.to_bits(), (-0.0_f32).to_bits());
+            assert_eq!(result.mirrors.len(), usize::from(parameter.key.starts_with("velocity_")));
+            assert!(result.mirrors.iter().all(|mirror| mirror.value.to_bits() == (-0.0_f32).to_bits()));
         }
-        let trace = trace.lock().unwrap();
-        assert_eq!(trace.iter().filter(|command| command.starts_with("Target.ReadU8(")).count(), 3);
-        assert_eq!(trace.iter().filter(|command| command.as_str() == "Elf.GetExprValue(\"&m2006_motors[1]\")").count(), 4);
-        drop(trace);
+        for key in ["position_kp", "profile_max_spd", "finish_deg"] {
+            assert!(state.write_parameter(0x22, key, 1.0, true).is_err());
+        }
         finish(&state, worker);
     }
 
     #[test]
-    fn invalid_pointer_field_address_cpuid_and_optional_reject_before_write() {
-        for invalid in 0..5 {
+    fn invalid_pointer_field_address_and_cpuid_reject_before_write() {
+        for invalid in 0..4 {
             let mut target = Target::new(0x21);
             match invalid {
                 0 => { target.memory.insert(BASE, 0); },
                 1 => { target.memory.insert(CPUID, 0x410f_c241); },
                 2 => { target.symbols.insert("m2006_motors[0]->controller_.pid_.cfg_.Kp".into(), 0x0800_0000); },
-                3 => { target.symbols.insert("m2006_motors[0]->config_.velocity_pid.Kp".into(), BASE + 1); },
-                _ => { target.memory.insert(BASE + 0x3000, 0); },
+                _ => { target.symbols.insert("m2006_motors[0]->config_.velocity_pid.Kp".into(), BASE + 1); },
             }
             let (state, trace, worker, _) = target_mock(target);
-            assert!(state.write_parameter(0x21, if invalid == 4 { "position_kp" } else { "velocity_kp" }, 1.0, true).is_err());
+            assert!(state.write_parameter(0x21, "velocity_kp", 1.0, true).is_err());
             assert!(trace.lock().unwrap().iter().all(|command| !command.starts_with("Target.Write")));
             assert!(state.session.lock().unwrap().is_none());
             finish(&state, worker);

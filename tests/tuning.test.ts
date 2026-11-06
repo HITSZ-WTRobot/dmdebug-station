@@ -7,7 +7,7 @@ import { confirmParameter, exportTuningFile, finiteF32, parseTuningFile, sameF32
 const linear = DEVICE_MAP.get(0x0a)!, joint = DEVICE_MAP.get(0x0d)!, m2006 = DEVICE_MAP.get(0x21)!;
 function snapshotFor(definition: DeviceDefinition): OzoneSnapshot {
   return { deviceId: definition.id, parameters: tuningFields(definition).map((field, index) => {
-    const mirrored = definition.kind === 'm2006' ? field.key !== 'stationary_rpm' : index >= 5;
+    const mirrored = definition.kind === 'm2006' ? field.key.startsWith('velocity_') : index >= 5;
     return { key: field.key, label: field.label, unit: field.unit, expression: `fixed.${field.key}`, address: 0x24000000 + index * 8, value: Math.fround(index + 0.25),
       mirrors: mirrored ? [{ expression: `mirror.${field.key}`, address: 0x24001000 + index * 8, value: Math.fround(index + 0.25) }] : [] };
   }) };
@@ -20,10 +20,10 @@ function written(parameter: OzoneParameter, value: number): OzoneParameter {
   return { ...parameter, value: Math.fround(value), mirrors: parameter.mirrors.map(mirror => ({ ...mirror, value: Math.fround(value) })) };
 }
 
-test('固定八设备目录只使用内部单位，伸缩无 min/max，M2006 有十二字段', () => {
+test('固定八设备目录只使用内部单位，伸缩无 min/max，M2006 仅速度六字段', () => {
   assert.equal(tuningFields(linear).length, 8);
   assert.equal(tuningFields(joint).length, 10);
-  assert.equal(tuningFields(m2006).length, 12);
+  assert.deepEqual(tuningFields(m2006).map(field => field.key), ['velocity_kp', 'velocity_ki', 'velocity_kd', 'velocity_output_max', 'max_rpm', 'stationary_rpm']);
   assert.ok(!tuningFields(linear).some(field => field.key === 'min_deg' || field.key === 'max_deg'));
   assert.equal(tuningFields(linear).find(field => field.key === 'finish_deg')!.unit, 'deg');
   assert.throws(() => tuningFields(DEVICE_MAP.get(0x40)!));
@@ -52,6 +52,10 @@ test('参数文件按单设备 id/kind/固定 keys 严格匹配，不接受旧 s
   for (const candidate of invalid) assert.throws(() => parseTuningFile(JSON.stringify(candidate), linear));
   assert.throws(() => parseTuningFile('[]', linear));
   assert.throws(() => parseTuningFile('{bad json', linear));
+  const speedFile = fileFor(m2006);
+  for (const key of ['position_kp', 'profile_max_spd', 'finish_deg']) {
+    assert.throws(() => parseTuningFile(JSON.stringify({ ...speedFile, values: { ...speedFile.values, [key]: 1 } }), m2006));
+  }
 });
 
 test('导入只产生独立草稿值，不修改当前快照；导出仅包含实际回读', () => {
@@ -77,6 +81,7 @@ test('快照拒绝错误设备、缺字段、重复 key、错误镜像与无效�
     { ...snapshot, parameters: snapshot.parameters.map((parameter, index) => index === 0 ? { ...parameter, address: 3 } : parameter) },
     { ...snapshot, parameters: snapshot.parameters.map((parameter, index) => index === 0 ? { ...parameter, mirrors: [] } : parameter) },
     { ...snapshot, parameters: snapshot.parameters.map((parameter, index) => index === 0 ? { ...parameter, value: Infinity } : parameter) },
+    { ...snapshot, parameters: snapshot.parameters.map(parameter => parameter.key === 'max_rpm' ? { ...parameter, mirrors: [{ expression: 'old.mirror', address: 0x24002000, value: 300 }] } : parameter) },
   ];
   for (const candidate of invalid) assert.throws(() => validateSnapshot(candidate, m2006));
 });

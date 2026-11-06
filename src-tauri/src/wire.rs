@@ -1,6 +1,6 @@
 // 协议 v2 字节契约；只在完整校验后交给事务状态机。
 pub const IDS: [u8; 9] = [0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x21, 0x22, 0x40];
-pub const KINDS: [u8; 9] = [1, 1, 1, 2, 1, 2, 3, 3, 4];
+pub const KINDS: [u8; 9] = [1, 1, 1, 2, 1, 2, 5, 5, 4];
 pub const HEARTBEAT: u8 = 1;
 pub const INFO: u8 = 2;
 pub const STATE: u8 = 0x10;
@@ -13,6 +13,7 @@ pub const ZERO: u8 = 0x23;
 pub const MOVE: u8 = 0x24;
 pub const LIMITS: u8 = 0x25;
 pub const VELOCITY: u8 = 0x26;
+pub const MOTOR_VELOCITY: u8 = 0x28;
 pub type Frame = [u8; 64];
 pub fn u16_at(b: &[u8], p: usize) -> u16 { u16::from_le_bytes([b[p], b[p + 1]]) }
 pub fn float(b: &[u8], p: usize) -> f32 { f32::from_le_bytes(b[p..p + 4].try_into().unwrap()) }
@@ -37,7 +38,7 @@ pub fn expected(op: u8, id: u8) -> Vec<u8> {
     else if op == WHEELS && id == 0x40 { vec![0x41, 0x42, 0x43, 0x44] } else { vec![id] }
 }
 pub fn definition(id: u8) -> Option<(u8, u8, u8)> {
-    IDS.iter().position(|v| *v == id).map(|i| { let kind = KINDS[i]; (kind, if kind == 1 { 2 } else if kind == 4 { 3 } else { 1 }, if kind <= 2 { 1 } else if kind == 3 { 3 } else { 2 }) })
+    IDS.iter().position(|v| *v == id).map(|i| { let kind = KINDS[i]; (kind, if kind == 1 { 2 } else if kind == 4 { 3 } else if kind == 5 { 4 } else { 1 }, if kind <= 2 { 1 } else if kind == 5 { 3 } else { 2 }) })
 }
 #[derive(Debug, PartialEq)]
 pub enum Issue { Crc, Version, Structure }
@@ -62,10 +63,10 @@ pub fn validate(b: &Frame) -> Result<(), Issue> {
             if op == STATE {
                 if b[16..20] != [kind, unit, bus, 0] { return Err(Issue::Structure); }
                 if kind == 4 { exact(44)?; finite(&[28, 32, 36, 40, 44, 48])?; }
-                else if kind == 3 { exact(32)?; finite(&[28, 32, 36, 40])?; }
+                else if kind == 5 { exact(32)?; finite(&[28, 32, 36, 40])?; }
                 else { exact(48)?; finite(&[28, 32, 36, 40, 44, 48, 52])?; }
             } else if op == PARAMETERS {
-                if kind == 3 { exact(50)?; finite(&[14, 18, 22, 26, 30, 34, 38, 42, 46, 50, 54, 58])?; }
+                if kind == 5 { exact(26)?; finite(&[14, 18, 22, 26, 30, 34])?; }
                 else if kind == 4 { exact(30)?; finite(&[14, 18, 22, 26, 30, 34, 38])?; }
                 else {
                     exact(48)?;
@@ -128,7 +129,7 @@ mod golden_vectors {
             (2,STATE,255,vec![],[0x5f,0x62]),
             (3,MOVE,0x0a,vec![2.],[0x0b,0x78]),
             (4,MOVE,0x0d,vec![30.],[0x2a,0x3b]),
-            (5,MOVE,0x21,vec![90.],[0xbc,0x15]),
+            (5,MOTOR_VELOCITY,0x21,vec![90.],[0xfb,0x2c]),
             (6,VELOCITY,0x40,vec![0.05,0.,0.],[0xe7,0x41]),
             (7,WHEELS,0x40,vec![],[0x5a,0xf4]),
             (8,DISABLE,255,vec![],[0x3d,0x02]),

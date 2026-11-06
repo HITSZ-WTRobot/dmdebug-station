@@ -202,7 +202,7 @@ export class TransportManager {
     let bytes: Uint8Array;
     try { bytes = encodeRequest(sequence, opcode, id, values); } catch (error) { return Promise.reject(error); }
     const { promise, resolve, reject } = Promise.withResolvers<Response[]>();
-    const transaction: Transaction = { sequence, opcode, id, bytes, expected: new Set(expectedResponseIds(opcode, id)), responses: new Map(), retries: opcode === Opcode.BodyVelocity ? 0 : 1, deadline: 0, resolve, reject };
+    const transaction: Transaction = { sequence, opcode, id, bytes, expected: new Set(expectedResponseIds(opcode, id)), responses: new Map(), retries: opcode === Opcode.BodyVelocity || opcode === Opcode.MotorVelocity ? 0 : 1, deadline: 0, resolve, reject };
     if (priority) this.queue.unshift(transaction); else this.queue.push(transaction);
     this.pump();
     return promise;

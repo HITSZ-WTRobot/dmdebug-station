@@ -127,7 +127,7 @@ function OzoneDevice({ deviceId }: { deviceId: number }) {
     <div className="panel-heading"><div><h2 className="panel-title">{definition.name} · {hexId(deviceId)}</h2><p>固定 TCP 127.0.0.1:19200 · {connected ? 'Ozone 已连接' : 'Ozone 未连接'} · {pending ? '等待当前请求完成' : '无在途请求'}</p></div></div>
     <div className="ozone-content">
       <p className="muted">仅使用当前 ELF 的固定设备 / 字段表达式，显示实际地址，不接受任意表达式或地址。连接只检查 Cortex-M7 类型及符号可读性。读取不提交固件请求；写入直接作用于活跃控制器及必要配置镜像。不会暂停、复位或运行目标，不覆盖目标位置，不自动重连。</p>
-      <p className="notice warning">全部角度、轨迹及完成阈值使用控制器内部输出轴 deg 单位。{definition.kind === 'linear' ? '伸缩也使用 deg / deg/s，不是串口位置面板的 mm；226.2 mm / 圈换算仍只保留在原串口视图。' : '原串口面板单位与行为不变。'}多个地址顺序读写期间目标仍可运行，快照并非原子采样。</p>
+      <p className="notice warning">{definition.kind === 'm2006' ? 'M2006仅直接速度PID及输出轴rpm上限/静止阈值，无位置PD、轨迹或到位参数。' : 'DM角度、轨迹及完成阈值使用控制器内部输出轴deg单位。'}{definition.kind === 'linear' ? '伸缩也使用deg/deg/s，不是串口位置面板的mm；226.2mm/圈换算仍只在串口视图。' : ''}多个地址顺序读写期间目标仍可运行，快照并非原子采样。</p>
       {desktop ? <>
         <div className="actions">
           <button type="button" className="button" disabled={connected || pending} onClick={() => void connect()}>连接 Ozone</button>

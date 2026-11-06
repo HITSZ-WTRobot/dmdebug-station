@@ -5,12 +5,12 @@ export const BROADCAST = 0xff;
 export const Opcode = {
   Heartbeat: 0x01, Info: 0x02, State: 0x10, Parameters: 0x11, Wheels: 0x12,
   Enable: 0x20, Disable: 0x21, Stop: 0x22, SetZero: 0x23, Move: 0x24,
-  SetLimits: 0x25, BodyVelocity: 0x26,
+  SetLimits: 0x25, BodyVelocity: 0x26, MotorVelocity: 0x28,
 } as const;
 export type DeviceKind = 'linear' | 'joint' | 'm2006' | 'chassis';
 export interface DeviceDefinition {
   id: number; name: string; model: string; kind: DeviceKind; bus: 1 | 2 | 3;
-  unit: 'mm' | 'deg' | 'body'; wireKind: number; canLabel: string;
+  unit: 'mm' | 'deg' | 'rpm' | 'body'; wireKind: number; canLabel: string;
 }
 export const DEVICES: readonly DeviceDefinition[] = [
   { id: 0x0a, name: '右前伸缩', model: 'DM-S3519', kind: 'linear', bus: 1, unit: 'mm', wireKind: 1, canLabel: 'CAN 0A → 2A' },
@@ -19,8 +19,8 @@ export const DEVICES: readonly DeviceDefinition[] = [
   { id: 0x0d, name: '左前关节', model: 'DM-J4340P', kind: 'joint', bus: 1, unit: 'deg', wireKind: 2, canLabel: 'CAN 0D → 2D' },
   { id: 0x0e, name: '左前伸缩', model: 'DM-S3519', kind: 'linear', bus: 1, unit: 'mm', wireKind: 1, canLabel: 'CAN 0E → 2E' },
   { id: 0x0f, name: '右前关节', model: 'DM-J4340P', kind: 'joint', bus: 1, unit: 'deg', wireKind: 2, canLabel: 'CAN 0F → 2F' },
-  { id: 0x21, name: 'M2006 · 1', model: 'M2006 / C610', kind: 'm2006', bus: 3, unit: 'deg', wireKind: 3, canLabel: 'ID 1 → 201' },
-  { id: 0x22, name: 'M2006 · 2', model: 'M2006 / C610', kind: 'm2006', bus: 3, unit: 'deg', wireKind: 3, canLabel: 'ID 2 → 202' },
+  { id: 0x21, name: 'M2006 · 1', model: 'M2006 / C610', kind: 'm2006', bus: 3, unit: 'rpm', wireKind: 5, canLabel: 'ID 1 → 201' },
+  { id: 0x22, name: 'M2006 · 2', model: 'M2006 / C610', kind: 'm2006', bus: 3, unit: 'rpm', wireKind: 5, canLabel: 'ID 2 → 202' },
   { id: 0x40, name: '全向轮底盘', model: '4 × DM-S3519', kind: 'chassis', bus: 2, unit: 'body', wireKind: 4, canLabel: '0B / 0A / 09 / 0C' },
 ];
 export const DEVICE_MAP = new Map(DEVICES.map(d => [d.id, d]));
@@ -36,7 +36,7 @@ export const RESULT_NAMES: Record<number, string> = {
 export const OPCODE_NAMES: Record<number, string> = {
   1: '心跳', 2: '设备发现', 0x10: '状态', 0x11: '参数', 0x12: '四轮反馈',
   0x20: '使能', 0x21: '失能', 0x22: '停止 / 保持', 0x23: '设置软件零点',
-  0x24: '绝对位置目标', 0x25: '应用运动约束', 0x26: '车体系速度',
+  0x24: '绝对位置目标', 0x25: '应用运动约束', 0x26: '车体系速度', 0x28: '输出轴速度目标',
 };
 export const hexId = (id: number) => `0x${id.toString(16).toUpperCase().padStart(2, '0')}`;
 export const resultName = (result: number) => RESULT_NAMES[result] ?? `未知结果 ${result}`;
@@ -85,7 +85,7 @@ export interface Info extends BaseResponse {
   trajectoryHz: number; positionHz: number; velocityHz: number; chassisHz: number; baudRate: number;
 }
 export interface MotorState extends BaseResponse {
-  type: 'motor-state'; kind: 'linear' | 'joint' | 'm2006'; unit: 'mm' | 'deg'; bus: number; flags: Flags;
+  type: 'motor-state'; kind: 'linear' | 'joint' | 'm2006'; unit: 'mm' | 'deg' | 'rpm'; bus: number; flags: Flags;
   lastResult: number; motorState: number | null; feedbackCount: number;
   position: number; velocity: number; target: number; reference: number | null; referenceVelocity: number | null;
   torque: number | null; torqueFeedforward: number | null; pendingCommand: number | null;
@@ -106,8 +106,7 @@ export interface DmParameters extends BaseResponse {
 }
 export interface DjiParameters extends BaseResponse {
   type: 'dji-parameters'; velocityPid: { kp: number; ki: number; kd: number; outputMax: number };
-  positionPd: { kp: number; kd: number; outputMax: number };
-  profile: { maxVelocity: number; maxAcceleration: number; maxJerk: number }; finish: number; stationaryRpm: number;
+  maxRpm: number; stationaryRpm: number;
 }
 export interface ChassisParameters extends BaseResponse {
   type: 'chassis-parameters'; maxVx: number; maxVy: number; maxWz: number; maxWheelRpm: number;
@@ -146,21 +145,21 @@ export function decodeFrame(frame: Uint8Array): Response {
   }
   if (!definition) throw new Error(`未知逻辑设备${hexId(base.id)}`);
   if (base.opcode === Opcode.State) {
-    if (frame[16] !== definition.wireKind || frame[17] !== (definition.unit === 'mm' ? 2 : definition.unit === 'deg' ? 1 : 3) || frame[18] !== definition.bus || frame[19] !== 0) throw new Error('状态类型、单位或总线不匹配');
+    if (frame[16] !== definition.wireKind || frame[17] !== (definition.unit === 'mm' ? 2 : definition.unit === 'deg' ? 1 : definition.unit === 'rpm' ? 4 : 3) || frame[18] !== definition.bus || frame[19] !== 0) throw new Error('状态类型、单位或总线不匹配');
     if (definition.kind === 'chassis') {
       exact(44); return { ...base, type: 'chassis-state', kind: 'chassis', flags: flags(), lastResult: u16(8),
         velocity: { vx: f32(16), vy: f32(20), wz: f32(24) }, target: { vx: f32(28), vy: f32(32), wz: f32(36) }, onlineMask: frame[52], enabledMask: frame[53], faultMask: frame[54] };
     }
     exact(definition.kind === 'm2006' ? 32 : 48);
-    return { ...base, type: 'motor-state', kind: definition.kind, unit: definition.unit as 'mm' | 'deg', bus: definition.bus, flags: flags(), lastResult: u16(8),
+    return { ...base, type: 'motor-state', kind: definition.kind, unit: definition.unit as MotorState['unit'], bus: definition.bus, flags: flags(), lastResult: u16(8),
       motorState: definition.kind === 'm2006' ? null : u16(10), feedbackCount: view.getUint32(24, true), position: f32(16), velocity: f32(20), target: f32(24),
-      reference: definition.kind === 'm2006' ? null : f32(28), referenceVelocity: definition.kind === 'm2006' ? f32(28) * 6 : f32(32),
+      reference: definition.kind === 'm2006' ? null : f32(28), referenceVelocity: definition.kind === 'm2006' ? f32(28) : f32(32),
       torque: definition.kind === 'm2006' ? null : f32(36), torqueFeedforward: definition.kind === 'm2006' ? null : f32(40), pendingCommand: definition.kind === 'm2006' ? null : u16(44) };
   }
   if (base.opcode === Opcode.Parameters) {
     if (definition.kind === 'm2006') {
-      exact(50); return { ...base, type: 'dji-parameters', velocityPid: { kp: f32(2), ki: f32(6), kd: f32(10), outputMax: f32(14) },
-        positionPd: { kp: f32(18), kd: f32(22), outputMax: f32(26) }, profile: { maxVelocity: f32(30), maxAcceleration: f32(34), maxJerk: f32(38) }, finish: f32(42), stationaryRpm: f32(46) };
+      exact(26); return { ...base, type: 'dji-parameters', velocityPid: { kp: f32(2), ki: f32(6), kd: f32(10), outputMax: f32(14) },
+        maxRpm: f32(18), stationaryRpm: f32(22) };
     }
     if (definition.kind === 'chassis') { exact(30); return { ...base, type: 'chassis-parameters', maxVx: f32(2), maxVy: f32(6), maxWz: f32(10), maxWheelRpm: f32(14), radiusMm: f32(18), distanceXmm: f32(22), distanceYmm: f32(26) }; }
     exact(48); if (frame[16] !== definition.wireKind || frame[17] !== (definition.kind === 'linear' ? 2 : 1) || frame[18] !== 1) throw new Error('DM参数类型或单位错误');

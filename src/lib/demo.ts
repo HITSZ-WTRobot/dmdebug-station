@@ -1,6 +1,6 @@
 // Explicitly selected protocol demonstration, never a hardware fallback or a motor-physics claim.
 import { DEVICES, Opcode, calcCrc16, type BodyVelocity, type DeviceDefinition } from './protocol';
-interface DemoDevice { definition: DeviceDefinition; position: number; target: number; origin: number; enabled: boolean; busy: boolean; complete: boolean; fault: boolean; lastResult: number; count: number; body: BodyVelocity; limits: number[] }
+interface DemoDevice { definition: DeviceDefinition; position: number; target: number; origin: number; enabled: boolean; busy: boolean; complete: boolean; fault: boolean; lastResult: number; count: number; stationaryCount: number; body: BodyVelocity; limits: number[] }
 export class ProtocolDemo {
   private devices = new Map<number, DemoDevice>();
   private previousTime = performance.now();
@@ -10,7 +10,7 @@ export class ProtocolDemo {
   private replies: Uint8Array[] = [];
   constructor() {
     for (const definition of DEVICES) this.devices.set(definition.id, { definition, position: 0, target: 0, origin: 0,
-      enabled: false, busy: false, complete: false, fault: false, lastResult: 0, count: 50, body: { vx: 0, vy: 0, wz: 0 },
+      enabled: false, busy: false, complete: false, fault: false, lastResult: 0, count: 50, stationaryCount: 50, body: { vx: 0, vy: 0, wz: 0 },
       limits: definition.kind === 'linear' ? [6.283333, 12.566667, 62.833333] : [-180, 180, 10, 20, 100] });
   }
   private response(request: Uint8Array, id: number, result: number, length = 2, write?: (view: DataView, bytes: Uint8Array) => void): Uint8Array {
@@ -21,10 +21,15 @@ export class ProtocolDemo {
   }
   handle(request: Uint8Array): Uint8Array[] {
     const now = performance.now(), dt = Math.min((now - this.previousTime) / 1000, 1); this.previousTime = now;
-    if (now - this.lastRequest >= 500) { this.timeout = true; for (const m of this.devices.values()) { m.enabled = m.busy = false; m.fault = true; m.lastResult = 107; m.body = { vx: 0, vy: 0, wz: 0 }; } }
+    const timedOut = now - this.lastRequest >= 500;
+    if (timedOut) { this.timeout = true; for (const m of this.devices.values()) { m.enabled = m.busy = false; m.fault = true; m.lastResult = 107; m.body = { vx: 0, vy: 0, wz: 0 }; if (m.definition.kind === 'm2006') { m.target = 0; m.stationaryCount = 0; } } }
     for (const m of this.devices.values()) {
       m.count = (m.count + Math.max(1, Math.round(dt * 500))) >>> 0;
-      if (m.busy) { const distance = m.target - m.position; const speed = m.definition.kind === 'linear' ? m.limits[0] : m.definition.kind === 'm2006' ? 60 : m.limits[2];
+      if (m.definition.kind === 'm2006') {
+        const rpm = m.enabled ? m.target : 0;
+        m.position += rpm * 6 * dt;
+        if (!timedOut) m.stationaryCount = Math.abs(rpm) <= .1 ? Math.min(50, m.stationaryCount + Math.round(dt * 500)) : 0;
+      } else if (m.busy) { const distance = m.target - m.position; const speed = m.definition.kind === 'linear' ? m.limits[0] : m.limits[2];
         m.position += Math.sign(distance) * Math.min(Math.abs(distance), dt * speed);
         if (Math.abs(m.position - m.target) < 0.0001) { m.position = m.target; m.busy = false; m.complete = true; } }
     }
@@ -54,26 +59,40 @@ export class ProtocolDemo {
         v.setFloat32(24, rpm, true);
       }));
     } else {
+      if (id === 255 && opcode !== Opcode.State && opcode !== Opcode.Disable && opcode !== Opcode.Stop) return [this.response(request, id, 105)];
       const ids = id === 255 ? DEVICES.map(d => d.id) : [id];
       responses = ids.map(deviceId => {
         const m = this.devices.get(deviceId); if (!m) return this.response(request, deviceId, 105);
         if (opcode === Opcode.State) return this.state(request, m);
         if (opcode === Opcode.Parameters) return this.parameters(request, m);
         let result = 0;
-        if (this.timeout && (opcode === Opcode.Enable || opcode === Opcode.Move || opcode === Opcode.BodyVelocity)) result = 107;
+        const velocityMotor = m.definition.kind === 'm2006';
+        const wrongDevice = (velocityMotor && (opcode === Opcode.Move || opcode === Opcode.SetZero || opcode === Opcode.SetLimits)) ||
+          (opcode === Opcode.MotorVelocity && !velocityMotor);
+        const required = opcode === Opcode.Move || opcode === Opcode.MotorVelocity ? 4 : opcode === Opcode.BodyVelocity ? 12 : opcode === Opcode.SetLimits ? (m.definition.kind === 'linear' ? 12 : 20) : 0;
+        if (wrongDevice) result = 105;
+        else if (view.getUint16(8, true) !== required) result = 102;
+        else if (this.timeout && (opcode === Opcode.Enable || opcode === Opcode.Move || opcode === Opcode.BodyVelocity || opcode === Opcode.MotorVelocity)) result = 107;
         else if (opcode === Opcode.Enable) {
-          if (m.definition.kind === 'm2006' && m.fault) result = m.lastResult;
-          else { m.enabled = true; m.fault = false; m.complete = false; m.target = m.position; }
-        } else if (opcode === Opcode.Disable) { m.enabled = m.busy = m.complete = false; m.body = { vx: 0, vy: 0, wz: 0 }; if (m.definition.kind === 'm2006' && m.fault) result = m.lastResult; }
-        else if (opcode === Opcode.Stop) { if (!m.enabled) result = 3; else { m.busy = m.complete = false; m.target = m.position; m.body = { vx: 0, vy: 0, wz: 0 }; } }
+          if (velocityMotor && m.enabled) result = 4;
+          else if (velocityMotor && m.stationaryCount < 50) result = 7;
+          else { m.enabled = true; m.fault = false; m.complete = false; m.target = velocityMotor ? 0 : m.position; }
+        } else if (opcode === Opcode.Disable) { m.enabled = m.busy = m.complete = false; m.body = { vx: 0, vy: 0, wz: 0 }; if (velocityMotor) m.target = 0; }
+        else if (opcode === Opcode.Stop) { if (!m.enabled) result = 3; else { m.busy = m.complete = false; m.target = velocityMotor ? 0 : m.position; m.body = { vx: 0, vy: 0, wz: 0 }; } }
         else if (opcode === Opcode.SetZero) {
           if (m.enabled) result = 4; else { m.origin += m.position; m.position = m.target = 0; m.fault = false; m.complete = false; if (m.definition.kind === 'joint') m.limits.splice(0, 2, -180, 180); }
+        } else if (opcode === Opcode.MotorVelocity) {
+          const rpm = view.getFloat32(12, true);
+          if (!Number.isFinite(rpm)) result = 5;
+          else if (Math.abs(rpm) > 300) result = 6;
+          else if (m.fault) result = m.lastResult;
+          else if (!m.enabled) result = 3;
+          else { m.target = rpm; m.busy = m.complete = false; if (Math.abs(rpm) > .1) m.stationaryCount = 0; }
         } else if (opcode === Opcode.Move) {
           const target = view.getFloat32(12, true);
           if (!m.enabled) result = 3; else if (m.busy) result = 4;
           else if (!Number.isFinite(target) || (m.definition.kind === 'linear' && Math.abs(target + m.origin) > 125 / 19.203 * 226.2 / (2 * Math.PI)) ||
-            (m.definition.kind === 'joint' && (target < m.limits[0] || target > m.limits[1])) ||
-            (m.definition.kind === 'm2006' && (target < 0 || target > 360))) result = 6;
+            (m.definition.kind === 'joint' && (target < m.limits[0] || target > m.limits[1]))) result = 6;
           else { m.target = target; m.busy = true; m.complete = false; }
         } else if (opcode === Opcode.BodyVelocity && m.definition.kind === 'chassis') {
           const body = { vx: view.getFloat32(12, true), vy: view.getFloat32(16, true), wz: view.getFloat32(20, true) };
@@ -93,21 +112,21 @@ export class ProtocolDemo {
   private state(request: Uint8Array, m: DemoDevice): Uint8Array {
     const d = m.definition, length = d.kind === 'chassis' ? 44 : d.kind === 'm2006' ? 32 : 48;
     return this.response(request, d.id, 0, length, (v, b) => {
-      v.setUint16(14, 1 | (d.kind !== 'chassis' ? 2 : 0) | (d.bus === 1 ? 4 : 0) | (m.enabled ? 8 : 0) | (m.busy ? 32 : 0) | (m.complete ? 64 : 0) | (m.fault ? 128 : 0) | (this.timeout ? 256 : 0), true);
-      b[16] = d.wireKind; b[17] = d.unit === 'mm' ? 2 : d.unit === 'deg' ? 1 : 3; b[18] = d.bus;
+      v.setUint16(14, 1 | (d.bus === 1 ? 2 | 4 : 0) | (m.enabled ? 8 : 0) | (m.busy ? 32 : 0) | (m.complete ? 64 : 0) | (m.fault ? 128 : 0) | (this.timeout ? 256 : 0), true);
+      b[16] = d.wireKind; b[17] = d.unit === 'mm' ? 2 : d.unit === 'deg' ? 1 : d.unit === 'rpm' ? 4 : 3; b[18] = d.bus;
       v.setUint16(20, m.lastResult, true); v.setUint16(22, d.bus === 1 ? (m.enabled ? 1 : 0) : 0xffff, true); v.setUint32(24, d.kind === 'chassis' ? 0 : m.count, true);
       if (d.kind === 'chassis') { [m.body.vx, m.body.vy, m.body.wz, m.body.vx, m.body.vy, m.body.wz].forEach((n, i) => v.setFloat32(28 + i * 4, n, true)); b[52] = 15; b[53] = m.enabled ? 15 : 0; return; }
-      const speed = m.busy ? Math.sign(m.target - m.position) * (d.kind === 'linear' ? m.limits[0] : d.kind === 'm2006' ? 60 : m.limits[2]) : 0;
+      const speed = d.kind === 'm2006' ? (m.enabled ? m.target : 0) : m.busy ? Math.sign(m.target - m.position) * (d.kind === 'linear' ? m.limits[0] : m.limits[2]) : 0;
       v.setFloat32(28, m.position, true); v.setFloat32(32, speed, true); v.setFloat32(36, m.target, true);
-      if (d.kind === 'm2006') v.setFloat32(40, speed / 6, true);
+      if (d.kind === 'm2006') v.setFloat32(40, speed, true);
       else { v.setFloat32(40, m.position, true); v.setFloat32(44, speed, true); }
     });
   }
   private parameters(request: Uint8Array, m: DemoDevice): Uint8Array {
     const d = m.definition;
-    return this.response(request, d.id, 0, d.kind === 'm2006' ? 50 : d.kind === 'chassis' ? 30 : 48, (v, b) => {
+    return this.response(request, d.id, 0, d.kind === 'm2006' ? 26 : d.kind === 'chassis' ? 30 : 48, (v, b) => {
       let values: number[], offset: number;
-      if (d.kind === 'm2006') { values = [9, .1, 0, 8000, 5, 4000, 400, 1800, 1200, 3000, .5, .1]; offset = 14; }
+      if (d.kind === 'm2006') { values = [18, .1, 0, 8000, 300, .1]; offset = 14; }
       else if (d.kind === 'chassis') { values = [1, 1, 10, 160, 63.5, 435, 435]; offset = 14; }
       else { v.setUint16(14, d.kind === 'linear' ? 1 : 3, true); b[16] = d.wireKind; b[17] = d.kind === 'linear' ? 2 : 1; b[18] = 1;
         values = [...(d.kind === 'linear' ? [NaN, NaN, ...m.limits] : m.limits), 5, .5, 0, d.kind === 'linear' ? .1885 : .3, d.kind === 'linear' ? 1.1 : .1]; offset = 20; }

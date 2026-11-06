@@ -18,12 +18,7 @@ const dmLimits: readonly TuningField[] = [
 const m2006Fields: readonly TuningField[] = [
   { key: 'velocity_kp', label: '速度 PID Kp', unit: 'PID 增益' }, { key: 'velocity_ki', label: '速度 PID Ki', unit: 'PID 增益' },
   { key: 'velocity_kd', label: '速度 PID Kd', unit: 'PID 增益' }, { key: 'velocity_output_max', label: '速度 PID 输出限幅', unit: 'C610 电流指令' },
-  { key: 'position_kp', label: '位置 PD Kp', unit: 'PD 增益' }, { key: 'position_kd', label: '位置 PD Kd', unit: 'PD 增益' },
-  { key: 'position_output_max', label: '位置 PD 输出限幅', unit: 'deg/s' },
-  { key: 'profile_max_spd', label: '轨迹最大速度', unit: 'deg/s', note: '仅影响下条新轨迹，不重新规划正在执行的曲线。' },
-  { key: 'profile_max_acc', label: '轨迹最大加速度', unit: 'deg/s²', note: '仅影响下条新轨迹。' },
-  { key: 'profile_max_jerk', label: '轨迹最大 jerk', unit: 'deg/s³', note: '仅影响下条新轨迹。' },
-  { key: 'finish_deg', label: '完成阈值', unit: 'deg', note: '同步两个实际到位判据。' },
+  { key: 'max_rpm', label: '最大输出轴转速', unit: '输出轴 rpm' },
   { key: 'stationary_rpm', label: '静止阈值', unit: '输出轴 rpm' },
 ];
 export function tuningFields(definition: DeviceDefinition): readonly TuningField[] {
@@ -42,7 +37,7 @@ function validateLocation(value: OzoneMirror): void {
 export function validateParameter(parameter: OzoneParameter, definition: DeviceDefinition): void {
   if (!parameter || !tuningFields(definition).some(field => field.key === parameter.key) || typeof parameter.label !== 'string' || typeof parameter.unit !== 'string' || !Array.isArray(parameter.mirrors)) throw new Error('Ozone 返回未知参数 key 或字段格式错误');
   validateLocation(parameter);
-  const mirrored = definition.kind === 'm2006' ? parameter.key !== 'stationary_rpm' : dmLimits.some(field => field.key === parameter.key);
+  const mirrored = definition.kind === 'm2006' ? parameter.key.startsWith('velocity_') : dmLimits.some(field => field.key === parameter.key);
   if (parameter.mirrors.length !== (mirrored ? 1 : 0)) throw new Error('Ozone 返回配置镜像数量不匹配');
   parameter.mirrors.forEach(validateLocation);
 }

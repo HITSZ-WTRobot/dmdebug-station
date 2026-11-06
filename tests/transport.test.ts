@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, mock, test, type Mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { ProtocolDemo } from '../src/lib/demo';
-import { BROADCAST, DEVICES, Opcode, calcCrc16, decodeFrame, type Response } from '../src/lib/protocol';
+import { BROADCAST, DEVICES, Opcode, calcCrc16, decodeFrame, encodeRequest, type Response } from '../src/lib/protocol';
 import { TransportManager } from '../src/lib/transport';
 import type { ConnectionState } from '../src/store/atoms';
 
@@ -541,5 +541,97 @@ describe('手柄反馈失效与速度重试边界', () => {
     assert.equal(h.status.phase, 'unresponsive');
     assert.equal(latestWorker().terminated, true);
     assert.equal(h.manager.getGamepadState().phase, 'off');
+  });
+});
+
+describe('M2006 输出轴速度契约', () => {
+  test('速度持续跨越整圈，可直接反向更新；停止归零但保持使能，失能不恢复旧目标', () => {
+    const demo = new ProtocolDemo(); let sequence = 0;
+    const send = (opcode: number, values: number[] = []) => decodeFrame(demo.handle(encodeRequest(++sequence, opcode, 0x21, values))[0]);
+    const state = () => { const response = send(Opcode.State); if (response.type !== 'motor-state') throw new Error('缺少电机状态'); return response; };
+    assert.equal(send(Opcode.Enable).result, 0);
+    assert.equal(send(Opcode.MotorVelocity, [300]).result, 0);
+    let moving = state();
+    for (let i = 0; i < 5; i++) { now += 200; moving = state(); }
+    assert.ok(moving.position > 360);
+    assert.equal(moving.unit, 'rpm'); assert.equal(moving.target, 300);
+    assert.equal(moving.velocity, 300); assert.equal(moving.referenceVelocity, 300); assert.equal(moving.reference, null);
+    assert.equal(moving.flags.busy, false); assert.equal(moving.flags.motionComplete, false);
+    assert.equal(moving.flags.zeroed, false); assert.equal(moving.flags.limitsConfigured, false);
+    assert.equal(send(Opcode.MotorVelocity, [-300]).result, 0);
+    now += 200; const reversing = state(); assert.ok(reversing.position < moving.position); assert.equal(reversing.velocity, -300);
+    assert.equal(send(Opcode.Stop).result, 0);
+    const stopped = state(); assert.equal(stopped.flags.enabled, true); assert.equal(stopped.target, 0); assert.equal(stopped.velocity, 0);
+    now += 200; assert.equal(state().position, stopped.position);
+    assert.equal(send(Opcode.MotorVelocity, [120]).result, 0);
+    assert.equal(send(Opcode.Disable).result, 0);
+    assert.equal(state().flags.enabled, false); assert.equal(state().target, 0); assert.equal(state().referenceVelocity, 0);
+    assert.equal(send(Opcode.MotorVelocity, [30]).result, 3);
+    now += 100; assert.equal(send(Opcode.Enable).result, 0); assert.equal(state().target, 0);
+  });
+
+  test('速度范围与非有限请求拒绝且保留有效参考，旧位置命令不能驱动速度设备', () => {
+    const demo = new ProtocolDemo(); let sequence = 0;
+    const send = (opcode: number, id = 0x21, values: number[] = []) => decodeFrame(demo.handle(encodeRequest(++sequence, opcode, id, values))[0]);
+    send(Opcode.Enable); assert.equal(send(Opcode.MotorVelocity, 0x21, [100]).result, 0);
+    for (const rpm of [-300.01, 300.01]) assert.equal(send(Opcode.MotorVelocity, 0x21, [rpm]).result, 6);
+    for (const rpm of [NaN, Infinity, -Infinity]) {
+      assert.throws(() => encodeRequest(++sequence, Opcode.MotorVelocity, 0x21, [rpm]));
+      const malformed = editReply(encodeRequest(++sequence, Opcode.MotorVelocity, 0x21, [0]), view => view.setFloat32(12, rpm, true));
+      assert.equal(decodeFrame(demo.handle(malformed)[0]).result, 5);
+    }
+    assert.equal(send(Opcode.Move, 0x21, [90]).result, 105); assert.equal(send(Opcode.SetZero).result, 105);
+    for (const id of [0x0a, 0x40]) assert.equal(send(Opcode.MotorVelocity, id, [90]).result, 105);
+    const state = send(Opcode.State); if (state.type !== 'motor-state') throw new Error('缺少电机状态');
+    assert.equal(state.target, 100); assert.equal(state.referenceVelocity, 100);
+  });
+
+  test('新参数六字段，拒绝旧 kind3、角度单位与50字节位置参数', () => {
+    const demo = new ProtocolDemo();
+    const info = demo.handle(encodeRequest(1, Opcode.Info, BROADCAST))[0];
+    assert.throws(() => decodeFrame(editReply(info, (_, bytes) => { bytes[39] = bytes[40] = 3; })));
+    const parameters = demo.handle(encodeRequest(2, Opcode.Parameters, 0x21))[0];
+    const decoded = decodeFrame(parameters); if (decoded.type !== 'dji-parameters') throw new Error('缺少速度参数');
+    assert.equal(decoded.maxRpm, 300); assert.equal(decoded.stationaryRpm, Math.fround(.1));
+    assert.equal('positionPd' in decoded, false); assert.equal('profile' in decoded, false); assert.equal('finish' in decoded, false);
+    assert.throws(() => decodeFrame(editReply(parameters, view => view.setUint16(8, 50, true))));
+    const state = demo.handle(encodeRequest(3, Opcode.State, 0x21))[0];
+    for (const change of [(bytes: Uint8Array) => { bytes[16] = 3; }, (bytes: Uint8Array) => { bytes[17] = 1; }]) {
+      assert.throws(() => decodeFrame(editReply(state, (_, bytes) => change(bytes))));
+    }
+  });
+
+  test('失联清目标并锁存；心跳不会自动复活，静止反馈后显式使能恢复零速度', () => {
+    const demo = new ProtocolDemo(); let sequence = 0;
+    const send = (opcode: number, values: number[] = [], id = 0x21) => decodeFrame(demo.handle(encodeRequest(++sequence, opcode, id, values))[0]);
+    const state = () => { const response = send(Opcode.State); if (response.type !== 'motor-state') throw new Error('缺少电机状态'); return response; };
+    send(Opcode.Enable); send(Opcode.MotorVelocity, [200]); now += 500;
+    const fault = state(); assert.equal(fault.flags.fault, true); assert.equal(fault.flags.enabled, false); assert.equal(fault.target, 0);
+    assert.equal(send(Opcode.Enable).result, 107);
+    send(Opcode.Heartbeat, [], BROADCAST); assert.equal(state().flags.fault, true);
+    assert.equal(send(Opcode.Disable).result, 0); assert.equal(send(Opcode.Enable).result, 7);
+    now += 100; assert.equal(state().flags.enabled, false);
+    assert.equal(send(Opcode.Enable).result, 0); const recovered = state();
+    assert.equal(recovered.flags.fault, false); assert.equal(recovered.target, 0); assert.equal(recovered.velocity, 0);
+  });
+
+  test('旧kind3固件握手不可进入ready', async () => {
+    const h = harness();
+    h.port.filter = (replies, request) => request[6] === Opcode.Info ? replies.map(reply => editReply(reply, (_, bytes) => { bytes[39] = bytes[40] = 3; })) : replies;
+    const connection = settle(h.manager.connect('web-serial')); await flushMessages();
+    const worker = latestWorker(); await tick(worker, 150); await tick(worker, 150);
+    assert.ok((await connection).error); assert.notEqual(h.status.phase, 'ready');
+    assert.equal(h.port.writes.some(write => write.bytes[6] === Opcode.MotorVelocity), false);
+  });
+
+  test('网页手动速度成功发0x28，未获ACK不重发旧速度', async () => {
+    const h = harness(); await h.manager.connect('web-serial');
+    await h.manager.command(Opcode.Enable, 0x21);
+    const accepted = await h.manager.command(Opcode.MotorVelocity, 0x21, [-120]); assert.equal(accepted[0].result, 0);
+    h.port.filter = (replies, request) => request[6] === Opcode.MotorVelocity ? [] : replies;
+    const start = h.port.writes.length, pending = settle(h.manager.command(Opcode.MotorVelocity, 0x21, [80]));
+    await flushMessages(); await tick(latestWorker(), 150);
+    assert.ok((await pending).error); assert.equal(h.port.writes.slice(start).filter(write => write.bytes[6] === Opcode.MotorVelocity).length, 1);
+    assert.equal(h.status.phase, 'unresponsive');
   });
 });

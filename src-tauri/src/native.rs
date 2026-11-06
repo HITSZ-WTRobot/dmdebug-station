@@ -233,7 +233,7 @@ impl Engine {
     }
     fn command(&mut self, op: u8, id: u8, values: Vec<f32>, reply: Reply) {
         if !self.ready(&reply) { return; }
-        if !matches!(op, ENABLE | DISABLE | STOP | ZERO | MOVE | LIMITS | VELOCITY) { let _ = reply.send(Err("不支持的手动动作".into())); return; }
+        if !matches!(op, ENABLE | DISABLE | STOP | ZERO | MOVE | LIMITS | VELOCITY | MOTOR_VELOCITY) { let _ = reply.send(Err("不支持的手动动作".into())); return; }
         let safe = matches!(op, DISABLE | STOP);
         if !safe && self.gamepad.phase != "off" { let _ = reply.send(Err("请先退出遥控，再执行普通手动操作".into())); return; }
         if self.manual && !safe { let _ = reply.send(Err("上一条操作仍在等待应答".into())); return; }
@@ -295,7 +295,7 @@ impl Engine {
         let Some(step) = job.steps.pop_front() else { return; };
         let bytes = match request(self.sequence, step.opcode, step.id, &step.values) { Ok(bytes) => bytes, Err(error) => { Self::reject(&mut job,&error); return; } };
         self.sequence = self.sequence.wrapping_add(1);
-        let expected = expected(step.opcode,step.id); let retries = if step.opcode == VELOCITY { 0 } else { 1 };
+        let expected = expected(step.opcode,step.id); let retries = if matches!(step.opcode, VELOCITY | MOTOR_VELOCITY) { 0 } else { 1 };
         self.active = Some(Transaction { job, step, bytes, expected, responses: Vec::new(), deadline: self.now + 150, retries }); self.send_active();
     }
     fn send_active(&mut self) {
@@ -679,6 +679,19 @@ mod tests {
     fn explicit_stop_even_when_off_disables_all_and_disconnect_closes_resource() {
         let mut h=Harness::ready();h.e.request_stop("显式停止",None);h.e.pump();h.drain();assert_eq!(h.sent.last().unwrap().1[6..8],[DISABLE,255]);
         let (reply,rx)=mpsc::channel();h.e.disconnect(reply);h.e.pump();h.drain();assert!(rx.try_recv().unwrap().is_ok());assert!(!h.e.status.port_open);let end=h.sent.len();h.tick(100);assert_eq!(h.sent.len(),end);
+    }
+    #[test]
+    fn motor_velocity_manual_command_is_supported_and_never_retried() {
+        let mut h = Harness::ready();
+        let (reply, enabled) = mpsc::channel(); h.e.command(ENABLE, 0x21, vec![], reply); h.e.pump(); h.drain();
+        assert!(enabled.try_recv().unwrap().is_ok());
+        let (reply, accepted) = mpsc::channel(); h.e.command(MOTOR_VELOCITY, 0x21, vec![-120.], reply); h.e.pump(); h.drain();
+        let frames = accepted.try_recv().unwrap().unwrap(); assert_eq!(frames[0][6], MOTOR_VELOCITY); assert_eq!(u16_at(&frames[0], 12), 0);
+        let start = h.sent.len();
+        let (reply, pending) = mpsc::channel(); h.e.command(MOTOR_VELOCITY, 0x21, vec![80.], reply); h.e.pump(); h.filtered(|_, _| Vec::new());
+        h.e.tick(150); h.drain(); assert!(pending.try_recv().unwrap().is_err());
+        assert_eq!(h.sent[start..].iter().filter(|(_, frame)| frame[6] == MOTOR_VELOCITY).count(), 1);
+        assert_eq!(h.e.status.phase, "unresponsive");
     }
     impl Engine {fn responses_for_test(&self)->usize {self.events.iter().filter(|e|matches!(e,Event::Response(_))).count()}}
 }

@@ -59,9 +59,15 @@ function motorSeries(samples: Sample[], view: MotorView, definition: DeviceDefin
     key: 'actual', label: view === 'position' ? '实际位置' : view === 'torque' ? '反馈力矩' : '实际速度', color: BLUE,
     value: sample => sample.type === 'motor' ? sample[view] : null,
   }];
+  if (definition.kind === 'm2006' && view === 'velocity') {
+    result.push({
+      key: 'target', label: '目标速度', color: TEAL, dashed: true,
+      value: sample => sample.type === 'motor' ? sample.target : null,
+    });
+  }
   const key = view === 'position' ? 'reference' : view === 'torque' ? 'torqueFeedforward' : 'referenceVelocity';
   if (!(view === 'position' && definition.kind === 'm2006') &&
-    samples.some(sample => sample.type === 'motor' && finite(sample[key]))) {
+    (definition.kind === 'm2006' && view === 'velocity' || samples.some(sample => sample.type === 'motor' && finite(sample[key])))) {
     result.push({
       key: 'reference', label: view === 'position' ? '参考位置' : view === 'torque' ? 'MIT附加前馈' : '参考速度', color: SLATE, dashed: true,
       value: sample => sample.type === 'motor' ? sample[key] : null,
@@ -152,11 +158,15 @@ function csvForDevice(definition: DeviceDefinition, samples: Sample[]): string {
     headers.push('actual_vx_m_s', 'actual_vy_m_s', 'actual_wz_deg_s', 'target_vx_m_s', 'target_vy_m_s', 'target_wz_deg_s');
     values = sample => sample.type === 'chassis'
       ? [sample.vx, sample.vy, sample.wz, sample.targetVx, sample.targetVy, sample.targetWz] : [];
+  } else if (definition.kind === 'm2006') {
+    headers.push('diagnostic_position_deg', 'actual_velocity_rpm', 'target_velocity_rpm', 'reference_velocity_rpm', 'feedback_count');
+    values = sample => sample.type === 'motor'
+      ? [sample.position, sample.velocity, sample.target, sample.referenceVelocity, sample.feedbackCount] : [];
   } else {
-    const referenceAvailable = definition.kind !== 'm2006' && samples.some(sample => sample.type === 'motor' && finite(sample.reference));
+    const referenceAvailable = samples.some(sample => sample.type === 'motor' && finite(sample.reference));
     const velocityReferenceAvailable = samples.some(sample => sample.type === 'motor' && finite(sample.referenceVelocity));
-    const torqueAvailable = definition.kind !== 'm2006' && samples.some(sample => sample.type === 'motor' && finite(sample.torque));
-    const feedforwardAvailable = definition.kind !== 'm2006' && samples.some(sample => sample.type === 'motor' && finite(sample.torqueFeedforward));
+    const torqueAvailable = samples.some(sample => sample.type === 'motor' && finite(sample.torque));
+    const feedforwardAvailable = samples.some(sample => sample.type === 'motor' && finite(sample.torqueFeedforward));
     headers.push(`actual_position_${definition.unit}`, `actual_velocity_${definition.unit}_s`, `target_position_${definition.unit}`);
     if (referenceAvailable) headers.push(`reference_position_${definition.unit}`);
     if (velocityReferenceAvailable) headers.push(`reference_velocity_${definition.unit}_s`);
@@ -187,6 +197,7 @@ function TelemetryContent({ definition, state, updatedAt, demo, coordinateEpoch 
   const [revision, setRevision] = useState(0);
   const [paused, setPaused] = useState(false);
   const [motorView, setMotorView] = useState<MotorView>('position');
+  const [m2006View, setM2006View] = useState<'position' | 'velocity'>('velocity');
   const [chassisView, setChassisView] = useState<ChassisView>('translation');
   const chartId = useId();
 
@@ -208,9 +219,12 @@ function TelemetryContent({ definition, state, updatedAt, demo, coordinateEpoch 
 
   const samples = histories.current.get(definition.id)?.samples ?? EMPTY_SAMPLES;
   const chassis = definition.kind === 'chassis';
-  const view = definition.kind === 'm2006' && motorView === 'torque' ? 'position' : motorView;
-  const unit = chassis ? (chassisView === 'translation' ? 'm/s' : 'deg/s') : (view === 'torque' ? 'Nm' : view === 'position' ? definition.unit : `${definition.unit}/s`);
-  const quantity = chassis ? (chassisView === 'translation' ? '车体平移速度' : '车体角速度') : (view === 'torque' ? '力矩' : view === 'position' ? '位置' : '速度');
+  const m2006 = definition.kind === 'm2006';
+  const view = m2006 ? m2006View : motorView;
+  const positionUnit = m2006 ? 'deg' : definition.unit;
+  const velocityUnit = m2006 ? 'rpm' : `${definition.unit}/s`;
+  const unit = chassis ? (chassisView === 'translation' ? 'm/s' : 'deg/s') : (view === 'torque' ? 'Nm' : view === 'position' ? positionUnit : velocityUnit);
+  const quantity = chassis ? (chassisView === 'translation' ? '车体平移速度' : '车体角速度') : (view === 'torque' ? '力矩' : view === 'position' ? m2006 ? '诊断位置' : '位置' : '速度');
   const series = useMemo(() => chassis ? chassisSeries(chassisView) : motorSeries(samples, view, definition),
     [chassis, chassisView, view, definition, samples, revision]);
   const geometry = useMemo(() => plotGeometry(samples, series), [samples, series, revision]);
@@ -257,8 +271,8 @@ function TelemetryContent({ definition, state, updatedAt, demo, coordinateEpoch 
           </div>
         ) : (
           <div className="segmented" role="group" aria-label="Motor chart series">
-            <button className={view === 'position' ? 'active' : ''} aria-pressed={view === 'position'} onClick={() => setMotorView('position')}>位置 / 参考 · {definition.unit}</button>
-            <button className={view === 'velocity' ? 'active' : ''} aria-pressed={view === 'velocity'} onClick={() => setMotorView('velocity')}>速度 / 参考 · {definition.unit}/s</button>
+            <button className={view === 'position' ? 'active' : ''} aria-pressed={view === 'position'} onClick={() => m2006 ? setM2006View('position') : setMotorView('position')}>{m2006 ? '诊断位置' : '位置 / 参考'} · {positionUnit}</button>
+            <button className={view === 'velocity' ? 'active' : ''} aria-pressed={view === 'velocity'} onClick={() => m2006 ? setM2006View('velocity') : setMotorView('velocity')}>{m2006 ? '速度 / 目标 / 参考' : '速度 / 参考'} · {velocityUnit}</button>
             {definition.kind !== 'm2006' && <button className={motorView === 'torque' ? 'active' : ''} aria-pressed={motorView === 'torque'} onClick={() => setMotorView('torque')}>力矩 · Nm</button>}
           </div>
         )}

@@ -19,6 +19,7 @@ function deviceStatus(device: DeviceSnapshot, now: number, sessionReady: boolean
   if (state.flags.hostLinkTimeout) return { label: '通讯超时锁存', tone: 'danger' };
   if (state.flags.fault) return { label: '故障待处理', tone: 'danger' };
   if (state.flags.enablePending) return { label: '等待使能确认', tone: 'warning' };
+  if (state.kind === 'm2006') return { label: state.flags.busy ? '命令忙' : state.flags.enabled ? '已授权 · 速度模式' : '在线 · 已失能', tone: state.flags.busy ? 'active' : 'success' };
   if (state.flags.busy) return { label: '运动中', tone: 'active' };
   if (state.flags.enabled) return { label: state.flags.motionComplete ? '已到位 · 使能中' : '已使能', tone: 'success' };
   if (state.type === 'motor-state' && !state.flags.zeroed) return { label: '等待建立零点', tone: 'warning' };
@@ -119,7 +120,7 @@ export function App() {
     setBusy(true); setWheels({});
     setCoordinateEpochs(previous => Object.fromEntries(DEVICES.map(d => [d.id, (previous[d.id] ?? 0) + 1])));
     setDevices(previous => Object.fromEntries(Object.entries(previous).map(([id, d]) => [id, { ...d, state: null, parameters: null, updatedAt: 0, parametersAt: 0 }])));
-    try { await engineRef.current.connect(mode, portName); setNotice({ tone: mode === 'demo' ? 'warning' : 'success', message: mode === 'demo' ? '正在使用协议演示数据，未连接真实电机。' : '握手成功。请逐台确认连接、零点和故障状态；不会自动使能。' }); }
+    try { await engineRef.current.connect(mode, portName); setNotice({ tone: mode === 'demo' ? 'warning' : 'success', message: mode === 'demo' ? '正在使用协议演示数据，未连接真实电机。' : '握手成功。请逐台确认连接与故障状态；DM 需检查零点，M2006 需查询速度参数。不会自动使能。' }); }
     catch (error) { setNotice({ tone: 'danger', message: error instanceof Error ? error.message : String(error) }); }
     finally { setBusy(false); }
   };
@@ -136,12 +137,12 @@ export function App() {
       const rejected = replies.filter(r => r.result !== 0);
       if (rejected.length) throw new Error(rejected.map(r => `${DEVICE_MAP.get(r.id)?.name ?? hexId(r.id)}：${resultName(r.result)}`).join('；'));
       if (opcode === Opcode.SetZero) setCoordinateEpochs(previous => ({ ...previous, [id]: (previous[id] ?? 0) + 1 }));
-      setNotice({ tone: 'success', message: `${OPCODE_NAMES[opcode]}已受理，实际使能、运动和到位以新反馈为准。` }); return replies;
+      setNotice({ tone: 'success', message: DEVICE_MAP.get(id)?.kind === 'm2006' ? `${OPCODE_NAMES[opcode]}已受理，软件授权与实际转速以新反馈为准。` : `${OPCODE_NAMES[opcode]}已受理，实际使能、运动和到位以新反馈为准。` }); return replies;
     } catch (error) { setNotice({ tone: 'danger', message: error instanceof Error ? error.message : String(error) }); throw error; }
     finally { setBusy(false); }
   }, []);
   const restoreHandshake = async () => {
-    setBusy(true); try { await engineRef.current?.handshake(); setNotice({ tone: 'warning', message: '已重新握手，不自动恢复使能或旧目标。故障设备仍需按要求重新设零/使能。' }); }
+    setBusy(true); try { await engineRef.current?.handshake(); setNotice({ tone: 'warning', message: '已重新握手，不自动恢复使能或旧目标。M2006 故障恢复需失能并等待 50 个新的低速反馈帧，再明确使能；DM 仍按零点与使能要求操作。' }); }
     catch (error) { setNotice({ tone: 'danger', message: String(error) }); } finally { setBusy(false); }
   };
   const exportLogs = () => {
@@ -187,20 +188,20 @@ export function App() {
     <div className="app-body">
       <aside className="device-sidebar" aria-label="按CAN总线选择设备">
         <div className="sidebar-heading"><span>设备列表</span><span className="mono">9 单元</span></div>
-        {([1, 2, 3] as const).map(bus => <section className="bus-group" key={bus}><div className="bus-heading"><span className="mono">FDCAN{bus}</span><span>{bus === 1 ? '位置 / MIT' : bus === 2 ? '底盘 / 速度' : 'M2006 / 外部环'}</span></div>
-          {DEVICES.filter(d => d.bus === bus).map(d => { const snapshot = devices[d.id], status = deviceStatus(snapshot, now, ready); const value = snapshot.state?.type === 'motor-state' ? snapshot.state.position : null;
-            return <button key={d.id} className={`device-row ${selectedId === d.id ? 'selected' : ''}`} aria-current={selectedId === d.id ? 'true' : undefined} onClick={() => setSelectedId(d.id)}><div className="device-row-main"><span>{d.name}</span><span className="device-value mono">{d.kind === 'chassis' ? '4 轮' : `${numeric(value)} ${d.unit === 'deg' ? '°' : 'mm'}`}</span></div><div className="device-row-meta"><span className={`status-dot ${status.tone}`} /><span>{status.label}</span><span className="mono device-id">{hexId(d.id)}</span></div></button>;
+        {([1, 2, 3] as const).map(bus => <section className="bus-group" key={bus}><div className="bus-heading"><span className="mono">FDCAN{bus}</span><span>{bus === 1 ? '位置 / MIT' : bus === 2 ? '底盘 / 速度' : 'M2006 / 速度 PID'}</span></div>
+          {DEVICES.filter(d => d.bus === bus).map(d => { const snapshot = devices[d.id], status = deviceStatus(snapshot, now, ready); const value = snapshot.state?.type === 'motor-state' ? d.kind === 'm2006' ? snapshot.state.velocity : snapshot.state.position : null;
+            return <button key={d.id} className={`device-row ${selectedId === d.id ? 'selected' : ''}`} aria-current={selectedId === d.id ? 'true' : undefined} onClick={() => setSelectedId(d.id)}><div className="device-row-main"><span>{d.name}</span><span className="device-value mono">{d.kind === 'chassis' ? '4 轮' : `${numeric(value)} ${d.unit === 'rpm' ? 'rpm' : d.unit === 'deg' ? '°' : 'mm'}`}</span></div><div className="device-row-meta"><span className={`status-dot ${status.tone}`} /><span>{status.label}</span><span className="mono device-id">{hexId(d.id)}</span></div></button>;
           })}</section>)}
         <div className="sidebar-note"><ShieldAlert size={17} /><p>软件停止不是硬件急停<br />连接或重连不会自动使能</p></div>
       </aside>
       <main className="main-workspace">
-        <div className="selection-heading"><div><div className="selection-meta"><span className="mono">FDCAN{definition.bus}</span><span>/</span><span className="mono">{hexId(definition.id)}</span><span>/</span><span>{definition.model}</span></div><h1>{definition.name}<span className={`state-label ${selectedStatus.tone}`}><span className={`status-dot ${selectedStatus.tone}`} />{selectedStatus.label}</span></h1><p>{definition.kind === 'linear' ? '相对软件零点的绝对毫米位置 · 226.2 mm / 输出轴圈' : definition.kind === 'joint' ? '相对软件零点 −180°～+180° · 保留S曲线规划' : definition.kind === 'm2006' ? '输出轴 0°～360° · 1 kHz速度 / 500 Hz位置 / 100 Hz前馈' : '车体系：x向前，y向左，逆时针为正 · 不提供整车位置导航'}</p></div><button className="button" disabled={!ready || busy} onClick={() => { void refresh(); }}><RefreshCw size={15} />刷新状态与参数</button></div>
+        <div className="selection-heading"><div><div className="selection-meta"><span className="mono">FDCAN{definition.bus}</span><span>/</span><span className="mono">{hexId(definition.id)}</span><span>/</span><span>{definition.model}</span></div><h1>{definition.name}<span className={`state-label ${selectedStatus.tone}`}><span className={`status-dot ${selectedStatus.tone}`} />{selectedStatus.label}</span></h1><p>{definition.kind === 'linear' ? '相对软件零点的绝对毫米位置 · 226.2 mm / 输出轴圈' : definition.kind === 'joint' ? '相对软件零点 −180°～+180° · 保留S曲线规划' : definition.kind === 'm2006' ? '输出轴 rpm · 1 kHz直接速度 PID · 位置仅作 deg 诊断，无位置保持' : '车体系：x向前，y向左，逆时针为正 · 不提供整车位置导航'}</p></div><button className="button" disabled={!ready || busy} onClick={() => { void refresh(); }}><RefreshCw size={15} />刷新状态与参数</button></div>
         <div className={`notice action-notice ${notice.tone === 'danger' ? 'danger' : notice.tone === 'warning' ? 'warning' : notice.tone === 'success' ? 'success' : ''}`} aria-live="polite">{notice.tone === 'danger' ? <ShieldAlert size={16} /> : notice.tone === 'success' ? <Check size={16} /> : <CircleHelp size={16} />}<span>{notice.message}</span></div>
         <div className="workspace-grid"><div className="controls-column"><DeviceControls key={selectedId} device={selected} ready={ready} busy={busy} fresh={fresh} onCommand={command} onRefresh={refresh} /></div>
           <div className="telemetry-column"><TelemetryPanel definition={definition} state={selected.state} updatedAt={selected.updatedAt} demo={connection.mode === 'demo'} coordinateEpoch={coordinateEpochs[selectedId] ?? 0} />
             <section className="panel feedback-panel"><div className="panel-heading"><div><h2 className="panel-title">反馈核对</h2><p className="muted">不是发送成功就代表设备在线</p></div><span className="mono subtle-meta">{selected.updatedAt ? `${Math.max(0, now - selected.updatedAt)} ms前` : '尚无应答'}</span></div>
               {definition.kind === 'chassis' ? <div className="wheel-table"><div className="wheel-table-heading"><span>轮位 / 逻辑标签</span><span>连接状态</span><span>转速 rpm</span><span>电机状态</span></div>{WHEEL_NAMES.map((name, i) => { const wheel = wheels[0x41 + i], valid = ready && wheel && now - wheel.time < 900; return <div className="wheel-table-row" key={name}><span>{name}<small className="mono">{hexId(0x41 + i)}</small></span><span className={valid && wheel.state.connected ? 'text-success' : 'muted'}>{!wheel ? '等待查询' : !valid ? '反馈过期' : wheel.state.connected ? '在线' : '离线'}</span><span className="mono">{numeric(wheel?.state.velocityRpm)}</span><span>{!wheel ? '—' : wheel.state.motorState === 1 ? '已使能' : wheel.state.motorState === 0 ? '已失能' : `故障 ${wheel.state.motorState}`}</span></div>; })}</div>
-                : <div className="feedback-grid"><div><span>通讯反馈</span><strong>{!selected.state ? '等待应答' : !fresh ? '反馈过期' : selected.state.flags.connected ? '设备在线' : '设备离线'}</strong></div><div><span>零点状态</span><strong>{!selected.state ? '—' : selected.state.flags.zeroed ? '已建立' : '待设零'}</strong></div><div><span>最近设备结果</span><strong>{selected.state ? resultName(selected.state.lastResult) : '—'}</strong></div><div><span>有效反馈帧</span><strong className="mono">{selected.state?.type === 'motor-state' ? selected.state.feedbackCount.toLocaleString() : '—'}</strong></div></div>}
+                : <div className="feedback-grid"><div><span>通讯反馈</span><strong>{!selected.state ? '等待应答' : !fresh ? '反馈过期' : selected.state.flags.connected ? '设备在线' : '设备离线'}</strong></div><div><span>{definition.kind === 'm2006' ? '控制模式' : '零点状态'}</span><strong>{definition.kind === 'm2006' ? '速度 PID · rpm' : !selected.state ? '—' : selected.state.flags.zeroed ? '已建立' : '待设零'}</strong></div><div><span>最近设备结果</span><strong>{selected.state ? resultName(selected.state.lastResult) : '—'}</strong></div><div><span>有效反馈帧</span><strong className="mono">{selected.state?.type === 'motor-state' ? selected.state.feedbackCount.toLocaleString() : '—'}</strong></div></div>}
             </section>
           </div>
         </div>
