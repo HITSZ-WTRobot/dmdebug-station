@@ -1,6 +1,6 @@
 # DMDebug Station 文档
 
-用于 STM32H723 三路 FDCAN 工程的设备工作台；Windows 桌面与便携网页共用 React/TypeScript 界面，按总线展示九个控制单元、十二台电机。上位机提供交互和协议，不承担电机实时控制，不修改 CubeMX 外设配置。
+用于 STM32H723 三路 FDCAN 工程的设备工作台；Windows、Linux、macOS桌面与便携网页共用 React/TypeScript 界面，按总线展示九个控制单元、十二台电机。上位机提供交互和协议，不承担电机实时控制，不修改 CubeMX 外设配置。
 
 ## 按任务阅读
 
@@ -23,4 +23,4 @@
 - 字节契约：[设备控制协议v2](https://github.com/HITSZ-WTRobot/FDCAN_DM_TEST/blob/main/doc/SERIAL_PROTOCOL.md)。
 - 实板流程：[电机通信检查与调参步骤](https://github.com/HITSZ-WTRobot/FDCAN_DM_TEST/blob/main/doc/MOTOR_TEST_GUIDE.md)。
 
-程序不自动连接、演示、使能或恢复旧目标。WinMM诊断/桌面手柄和经典蓝牙SPP直连当前仅支持Windows；macOS/Linux原生串口及演示的可用性须待对应CI结果确认，不能由Windows或网页验证推定。首次操作先阅读使用文档的安全边界。
+程序不自动连接、演示、使能或恢复旧目标。WinMM诊断/桌面手柄和经典蓝牙SPP直连仅支持Windows；macOS/Linux桌面使用原生串口与演示，构建与回归结论以对应版本CI/Release为准，不能由Windows或网页验证推定真实设备可用。首次操作先阅读使用文档的安全边界。

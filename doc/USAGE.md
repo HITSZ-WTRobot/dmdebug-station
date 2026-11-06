@@ -10,7 +10,7 @@
 - 免安装网页：下载[web/index.html](../web/index.html)或[web/串口.html](../web/串口.html)，直接用当前Chrome/Edge打开。两份文件由同一源码导出，JS/CSS及Worker内联，不需要开发服务器、额外worker、外部字体或CDN；GitHub源码预览不是串口运行入口。
 - 网页选择“浏览器串口”，点击“连接固件”并授权实际端口；要求Web Serial和`Promise.withResolvers`，建议当前Chrome/Edge（124+）。网页不能直接调用经典蓝牙RFCOMM；Web Bluetooth/BLE不替代HC-05 SPP，也不能建立Ozone原始TCP。
 - 串口固定115200、8N1、无流控。RFCOMM无线链路不设UART波特率，但HC-05到STM32仍须115200/8N1。手机、COM程序及SPP直连不能同时占用模块。
-- WinMM诊断/桌面手柄和SPP直连当前仅Windows可用；macOS/Linux原生串口及演示可用性须待对应CI结果确认，平台产物以[RELEASE](RELEASE.md)为准。
+- WinMM诊断/桌面手柄和SPP直连仅Windows可用；macOS/Linux桌面使用原生串口与演示，平台产物和构建结论以对应版本[Release](RELEASE.md)及CI记录为准，不代表真实串口或机构已验证。
 
 `dist/`是桌面所用Web资源，不是旧v1页面。修改源码后须重新构建对应EXE/HTML，不能继续用旧产物。“协议演示 · 无硬件”仅主动选择并启动，顶部持续提示来源；不是连接失败后备，不模拟真实电机动力学、S曲线、电流或带载效果。
 

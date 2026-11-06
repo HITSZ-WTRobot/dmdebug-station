@@ -2,7 +2,7 @@
 
 [文档索引](README.md) · [操作与安全](USAGE.md) · [调度与超时](ARCHITECTURE.md) · [验证记录](VALIDATION.md)
 
-WinMM只读诊断、桌面手柄采集和经典蓝牙SPP直连当前均为**Windows-only**。便携网页使用Web Serial及浏览器真实Gamepad API，不支持WinMM或经典RFCOMM；Web Bluetooth/BLE不是HC-05 SPP替代。macOS/Linux桌面原生串口/演示可用性待对应CI结果，不能由网页运行推定。
+WinMM只读诊断、桌面手柄采集和经典蓝牙SPP直连均为**Windows-only**。便携网页使用Web Serial及浏览器真实Gamepad API，不支持WinMM或经典RFCOMM；Web Bluetooth/BLE不是HC-05 SPP替代。macOS/Linux桌面使用原生串口/演示，各平台构建结论见对应版本CI与Release，不能由网页运行推定真实设备联调通过。
 
 ## HC-05类蓝牙链路
 

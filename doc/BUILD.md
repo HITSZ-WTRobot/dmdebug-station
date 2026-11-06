@@ -8,7 +8,7 @@
 - Windows桌面使用Rust工具链、Tauri v2、MSVC C++构建工具和Windows SDK；运行需要WebView2 Runtime。
 - 依赖版本由根目录`package-lock.json`与`src-tauri/Cargo.lock`记录。首次安装使用`npm ci`，避免无意更新锁文件。
 - 下列桌面开发命令对应目前Windows流程。WinMM输入诊断/桌面手柄采集与经典蓝牙RFCOMM/SPP直连是**Windows-only**；普通网页不提供这些原生能力。
-- macOS/Linux原生串口、协议演示及桌面产物的可用性须等待对应CI构建/检查结果，尚不能声称已构建或运行成功。浏览器版另依赖实际浏览器的Web Serial/Gamepad API支持，不等同于原生桌面平台验证。跨平台发布命令和产物以[RELEASE](RELEASE.md)为准。
+- macOS/Linux原生串口、协议演示及桌面产物由各自平台的Release构建检查；可下载附件和构建结论以该版本CI/Release为准，不能用Windows构建代替其他平台结果。浏览器版另依赖实际浏览器的Web Serial/Gamepad API支持，构建通过也不代表真实串口或机构验证。跨平台发布命令和产物见[RELEASE](RELEASE.md)。
 
 ## 安装、开发与测试
 
