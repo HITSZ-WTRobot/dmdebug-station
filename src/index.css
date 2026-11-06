@@ -59,6 +59,9 @@ input[type=number] { font-family: var(--mono); font-variant-numeric: tabular-num
 .port-field select { max-width: 220px; }.inline-field { display: flex; gap: 4px; align-items: center; }
 .port-hint { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--secondary); min-height: 36px; max-width: 200px; }
 .serial-format { font-size: 12px; color: #46566a; min-height: 36px; display: flex; flex-direction: column; justify-content: center; }.serial-format span { font: 9px/14px var(--mono); color: var(--muted); }
+.bluetooth-field select { max-width: 360px; }
+.bluetooth-guidance { flex-basis: 100%; max-width: 720px; margin: 0; color: var(--secondary); font-size: 11px; line-height: 1.6; }
+.bluetooth-guidance.text-danger { color: var(--danger); }
 .connection-progress { display: flex; gap: 12px; align-items: center; font-size: 10px; color: #96a0aa; white-space: nowrap; }
 .connection-step { display: flex; gap: 6px; align-items: center; }.connection-step.confirmed { color: #3e6552; }
 .step-number { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: #f1f4f6; font: 10px var(--mono); border: 1px solid #e0e5e9; }.confirmed .step-number { background: #eaf3ed; border-color: #c2d8c9; }

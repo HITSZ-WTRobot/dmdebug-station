@@ -112,6 +112,24 @@ afterEach(async () => {
   originalGlobals.clear();
 });
 
+test('浏览器拒绝蓝牙直连不关闭现有串口、不申请新授权，会话时钟继续工作', async () => {
+  const h = harness();
+  const requestPort = mock.fn(async () => h.port);
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { serial: { requestPort } } });
+  const close = mock.method(h.port, 'close');
+  await h.manager.connect('web-serial');
+  const status = h.status, worker = latestWorker(), writes = h.port.writes.length;
+  await assert.rejects(h.manager.connect('bluetooth', 'AA:BB:CC:DD:EE:FF'), /浏览器不支持经典蓝牙/);
+  assert.equal(requestPort.mock.callCount(), 1);
+  assert.equal(close.mock.callCount(), 0);
+  assert.strictEqual(h.status, status);
+  assert.equal(worker.terminated, false);
+  await tick(worker, 120);
+  assert.equal(h.status.phase, 'ready');
+  assert.equal(h.status.mode, 'web-serial');
+  assert.ok(h.port.writes.length > writes);
+});
+
 describe('连接专属 Worker 通信时钟', () => {
   test('Window 计时器完全不调度时，Worker 仍驱动心跳、九设备状态与四轮反馈', async () => {
     const h = harness();

@@ -7,7 +7,7 @@ use wire::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
@@ -160,6 +160,12 @@ impl Engine {
         let after = std::mem::replace(&mut job.after, After::None);
         match after { After::Disconnect(reply) | After::Reconnect(_, _, reply) => { let _ = reply.send(Err(message.into())); }, After::None => {} }
     }
+    fn set_after(job: &mut Job, after: After) {
+        match std::mem::replace(&mut job.after, after) {
+            After::Disconnect(reply) | After::Reconnect(_, _, reply) => { let _ = reply.send(Err("连接操作已被更新的请求替换".into())); }
+            After::None => {}
+        }
+    }
     fn cancel_queue(&mut self, reason: &str) {
         for mut job in self.queue.drain(..) { Self::reject(&mut job, reason); }
         self.manual = false;
@@ -173,8 +179,14 @@ impl Engine {
             if let Effect::Open(_, _, reply) = effect { let _ = reply.send(Err(reason.into())); }
         }
     }
+    fn failure_message(&self, message: impl Into<String>) -> String {
+        let message = message.into();
+        if self.status.mode == "bluetooth" && self.status.port_open && self.status.phase == "handshaking" && !message.starts_with("蓝牙链路已建立") {
+            format!("蓝牙链路已建立，但固件握手失败/无应答：{message}")
+        } else { message }
+    }
     fn fail(&mut self, message: impl Into<String>, phase: &str) {
-        let message = message.into(); self.invalidate(&message);
+        let message = self.failure_message(message); self.invalidate(&message);
         if let Some(mut active) = self.active.take() { Self::reject(&mut active.job, &message); }
         self.cancel_effects(&message); self.effects.push_back(Effect::Close); self.status.port_open = false;
         self.gp("off", format!("遥控已退出；{message}；未确认全体失能，软件停机不保证物理停止"));
@@ -188,15 +200,20 @@ impl Engine {
         self.gp("off", "连接已关闭；断开通讯不保证电机停止"); self.phase("disconnected", "已断开；断开通讯不等于实际电机已失能");
     }
     fn connect(&mut self, mode: String, port: String, reply: Reply) {
-        if mode != "tauri" && mode != "demo" { let _ = reply.send(Err("原生通信只接受 tauri 或明确的 demo 模式".into())); return; }
-        if mode == "tauri" && port.is_empty() { let _ = reply.send(Err("请选择系统串口".into())); return; }
+        if !matches!(mode.as_str(), "tauri" | "demo" | "bluetooth") { let _ = reply.send(Err("原生通信只接受 tauri、bluetooth 或明确的 demo 模式".into())); return; }
+        if mode != "demo" && port.is_empty() { let _ = reply.send(Err(if mode == "bluetooth" { "请选择已配对的蓝牙SPP设备" } else { "请选择系统串口" }.into())); return; }
         if self.status.port_open && self.status.phase == "ready" {
             self.request_stop("切换连接，先等待全体失能", None);
-            if let Some(job) = self.queue.iter_mut().find(|j| j.tag == Tag::Stop) { job.after = After::Reconnect(mode, port, reply); }
-            else if let Some(tx) = self.active.as_mut().filter(|tx| tx.job.tag == Tag::Stop) { tx.job.after = After::Reconnect(mode, port, reply); }
+            if let Some(job) = self.queue.iter_mut().find(|j| j.tag == Tag::Stop) { Self::set_after(job, After::Reconnect(mode, port, reply)); }
+            else if let Some(tx) = self.active.as_mut().filter(|tx| tx.job.tag == Tag::Stop) { Self::set_after(&mut tx.job, After::Reconnect(mode, port, reply)); }
+            else { let _ = reply.send(Err("切换连接前未能建立全体失能屏障".into())); }
             return;
         }
         self.close(); self.effects.push_back(Effect::Open(mode, port, reply));
+    }
+    fn opening(&mut self, mode: &str, port: &str) {
+        self.status = NativeStatus { mode: mode.into(), port_name: if mode == "demo" { "协议演示 · 无硬件连接".into() } else { port.into() }, ..NativeStatus::default() };
+        self.phase("opening", if mode == "bluetooth" { "正在建立蓝牙SPP链路，尚未完成固件握手" } else { "正在打开传输端口" });
     }
     fn opened(&mut self, mode: String, port: String, reply: Reply) {
         self.status = NativeStatus { mode: mode.clone(), port_name: if mode == "demo" { "协议演示 · 无硬件连接".into() } else { port }, port_open: true, ..NativeStatus::default() };
@@ -207,7 +224,7 @@ impl Engine {
         if self.selected == 0x40 { steps.push(step(WHEELS, 0x40)); } steps
     }
     fn handshake(&mut self, reply: Reply) {
-        if !self.status.port_open { let _ = reply.send(Err("请先打开串口".into())); return; }
+        if !self.status.port_open { let _ = reply.send(Err("请先打开通信链路".into())); return; }
         // 重新握手不能丢弃已发出的速度/使能事务；先经过全体失能屏障。
         if matches!(self.gamepad.phase.as_str(), "active" | "enabling" | "stopping") {
             let _ = reply.send(Err("请先停止遥控并等待失能确认，再重新握手".into())); return;
@@ -215,7 +232,7 @@ impl Engine {
         self.invalidate("重新握手，旧事务已取消");
         self.parser = Stream::default(); self.status.info_frame = None;
         self.gp("off", "重新握手，手柄遥控已退出；需重新手动开启");
-        self.phase("handshaking", "端口已打开，正在确认协议 v2 和九设备清单");
+        self.phase("handshaking", if self.status.mode == "bluetooth" { "蓝牙SPP链路已建立，正在确认固件协议 v2 和九设备清单" } else { "端口已打开，正在确认协议 v2 和九设备清单" });
         let mut steps = vec![step(HEARTBEAT, 255), step(HEARTBEAT, 255), step(INFO, 255)]; steps.extend(self.refresh_steps());
         self.queue.push_back(self.job(Tag::Handshake, steps, None, Some(reply)));
     }
@@ -284,8 +301,9 @@ impl Engine {
     fn disconnect(&mut self, reply: Reply) {
         if self.status.port_open && self.status.phase == "ready" {
             self.request_stop("断开连接，先等待全体失能", None);
-            if let Some(job) = self.queue.iter_mut().find(|j| j.tag == Tag::Stop) { job.after = After::Disconnect(reply); }
-            else if let Some(tx) = self.active.as_mut().filter(|t| t.job.tag == Tag::Stop) { tx.job.after = After::Disconnect(reply); }
+            if let Some(job) = self.queue.iter_mut().find(|j| j.tag == Tag::Stop) { Self::set_after(job, After::Disconnect(reply)); }
+            else if let Some(tx) = self.active.as_mut().filter(|t| t.job.tag == Tag::Stop) { Self::set_after(&mut tx.job, After::Disconnect(reply)); }
+            else { let _ = reply.send(Err("断开连接前未能建立全体失能屏障".into())); }
         } else { self.close(); let _ = reply.send(Ok(Vec::new())); }
     }
     fn pump(&mut self) {
@@ -343,7 +361,7 @@ impl Engine {
             if let Some(b) = failed {
                 let result = u16_at(b,12);
                 if !(tx.job.tag == Tag::Handshake && op == HEARTBEAT && result == 106) {
-                    let error = format!("命令 0x{op:02X} 被设备拒绝：结果 {result}");
+                    let error = self.failure_message(format!("命令 0x{op:02X} 被设备拒绝：结果 {result}"));
                     if tx.job.tag == Tag::GamepadStart {
                         if op == PARAMETERS { self.gp("off",error.clone()); } else { self.request_stop(&error,None); }
                         Self::reject(&mut tx.job,&error); return;
@@ -356,7 +374,7 @@ impl Engine {
         }
         if tx.job.tag == Tag::Handshake && op == INFO {
             let b = &tx.responses[0];
-            if u16_at(b,12) != 0 || u16_at(b,14) & 2 != 0 { let error = "设备发现锁存串口超时，需要新的心跳握手"; Self::reject(&mut tx.job,error); self.fail(error,"unresponsive"); return; }
+            if u16_at(b,12) != 0 || u16_at(b,14) & 2 != 0 { let error = self.failure_message("设备发现锁存串口超时，需要新的心跳握手"); Self::reject(&mut tx.job,&error); self.fail(error,"unresponsive"); return; }
             self.status.info_frame = Some(b.to_vec()); self.publish();
         }
         if tx.job.tag == Tag::GamepadStart && op == PARAMETERS {
@@ -420,22 +438,138 @@ impl Engine {
     }
 }
 
-// 真串口和演示模型都是 actor 私有资源；没有第二读取/写入者。
-enum Io { Serial(Box<dyn serialport::SerialPort>), Demo(native_demo::Demo) }
-fn open_serial(name: String) -> Result<Box<dyn serialport::SerialPort>, String> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let result = serialport::new(name,115200).data_bits(serialport::DataBits::Eight).stop_bits(serialport::StopBits::One).parity(serialport::Parity::None).flow_control(serialport::FlowControl::None).timeout(Duration::from_millis(5)).open();
-        // 若 2 秒超时接收端已关闭，send 失败会立即释放迟到的句柄。
-        let _ = tx.send(result);
-    });
-    let mut port = rx.recv_timeout(Duration::from_secs(2)).map_err(|_| "打开串口超过 2 秒，请检查端口选择或占用".to_string())?.map_err(|e| format!("无法打开串口：{e}"))?;
-    let _ = port.write_data_terminal_ready(true); let _ = port.write_request_to_send(true); Ok(port)
+// 所有已打开资源只归 actor 所有；临时 worker 只负责建立链路，不读写协议。
+enum Io {
+    Serial(Box<dyn serialport::SerialPort>), Bluetooth(crate::bluetooth::BluetoothStream), Demo(native_demo::Demo),
+    #[cfg(test)] Test(tests::TestIo),
+}
+impl Io {
+    fn read_available(&mut self, bytes: &mut [u8]) -> Option<std::io::Result<usize>> {
+        match self {
+            Self::Serial(port) => Some(port.read(bytes)),
+            Self::Bluetooth(stream) => Some(stream.read_available(bytes)),
+            Self::Demo(_) => None,
+            #[cfg(test)] Self::Test(stream) => Some(stream.read_available(bytes)),
+        }
+    }
+    fn eof_closes(&self) -> bool { !matches!(self, Self::Serial(_)) }
+    fn write_frame(&mut self, bytes: &Frame) -> std::io::Result<()> {
+        match self {
+            Self::Serial(port) => port.write_all(bytes),
+            Self::Bluetooth(stream) => stream.write_frame(bytes, Duration::from_millis(50)),
+            Self::Demo(_) => unreachable!("演示回包由同一 Engine 处理"),
+            #[cfg(test)] Self::Test(stream) => stream.write_frame(bytes, Duration::from_millis(50)),
+        }
+    }
+}
+fn open_timeout(mode: &str) -> Duration { Duration::from_secs(if mode == "bluetooth" { 8 } else { 2 }) }
+fn open_transport(mode: String, port: String, cancelled: &AtomicBool, now: u64) -> Result<Io, String> {
+    if cancelled.load(Ordering::Acquire) { return Err("打开通信链路已取消".into()); }
+    let io = match mode.as_str() {
+        "demo" => Io::Demo(native_demo::Demo::new(now)),
+        "bluetooth" => Io::Bluetooth(crate::bluetooth::BluetoothStream::connect(&port, open_timeout(&mode), cancelled)?),
+        _ => {
+            let mut port = serialport::new(port,115200).data_bits(serialport::DataBits::Eight).stop_bits(serialport::StopBits::One).parity(serialport::Parity::None).flow_control(serialport::FlowControl::None).timeout(Duration::from_millis(5)).open().map_err(|error| format!("无法打开串口：{error}"))?;
+            if cancelled.load(Ordering::Acquire) { return Err("打开串口已取消".into()); }
+            let _ = port.write_data_terminal_ready(true); let _ = port.write_request_to_send(true);
+            Io::Serial(port)
+        }
+    };
+    if cancelled.load(Ordering::Acquire) { return Err("打开通信链路已取消".into()); }
+    Ok(io)
+}
+struct PendingOpen {
+    epoch: u64, mode: String, port: String, reply: Option<Reply>,
+    cancelled: Arc<AtomicBool>, result: mpsc::Receiver<Result<Io, String>>, started: Instant,
+}
+impl PendingOpen {
+    fn cancel(&mut self, reason: &str) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(reply) = self.reply.take() { let _ = reply.send(Err(reason.into())); }
+    }
+}
+impl Drop for PendingOpen {
+    fn drop(&mut self) { self.cancel("连接已取消、被替换或通信线程已退出"); }
+}
+#[derive(Default)]
+struct TransportOwner { io: Option<Io>, opening: Option<PendingOpen> }
+impl TransportOwner {
+    fn close(&mut self) { self.opening = None; self.io = None; }
+    fn poll_open(&mut self, e: &mut Engine) {
+        let Some(mut pending) = self.opening.take() else { return; };
+        if pending.epoch != e.epoch {
+            pending.cancel("打开连接已被安全退出或新连接取消");
+            if e.status.phase == "opening" { e.close(); }
+            return;
+        }
+        let result = if pending.started.elapsed() >= open_timeout(&pending.mode) {
+            Some(Err(if pending.mode == "bluetooth" { "蓝牙SPP链路建立超时，请检查设备供电、配对及手机占用" } else { "打开端口超过 2 秒，请检查端口选择或占用" }.into()))
+        } else { match pending.result.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err("打开通信链路的任务意外退出".into())),
+        } };
+        let Some(result) = result else { self.opening = Some(pending); return; };
+        match result {
+            Ok(io) => {
+                self.io = Some(io);
+                e.opened(std::mem::take(&mut pending.mode), std::mem::take(&mut pending.port), pending.reply.take().unwrap());
+                e.pump();
+            }
+            Err(error) => {
+                let error = if pending.mode == "bluetooth" { format!("蓝牙SPP链路建立失败：{error}") } else { error };
+                pending.cancel(&error); e.fail(error, "disconnected");
+            }
+        }
+    }
+    fn effects<F>(&mut self, e: &mut Engine, opener: &Arc<F>)
+    where F: Fn(String, String, &AtomicBool, u64) -> Result<Io, String> + Send + Sync + 'static {
+        while let Some(effect) = e.effects.pop_front() {
+            match effect {
+                Effect::Close => self.close(),
+                Effect::Open(mode, port, reply) => {
+                    self.close(); e.opening(&mode, &port);
+                    let cancelled = Arc::new(AtomicBool::new(false)); let worker_cancelled = cancelled.clone();
+                    let (tx, result) = mpsc::channel(); let worker_mode = mode.clone(); let worker_port = port.clone();
+                    let opener = opener.clone(); let now = e.now;
+                    self.opening = Some(PendingOpen { epoch: e.epoch, mode, port, reply: Some(reply), cancelled, result, started: Instant::now() });
+                    thread::spawn(move || {
+                        let result = opener(worker_mode, worker_port, &worker_cancelled, now);
+                        // 接收者已取消时，发送失败或直接丢弃会关闭迟到的真实句柄，绝不握手。
+                        if !worker_cancelled.load(Ordering::Acquire) { let _ = tx.send(result); }
+                    });
+                }
+                Effect::Write(bytes) => match self.io.as_mut() {
+                    Some(Io::Demo(demo)) => { let replies = demo.handle(&bytes, e.now); for frame in replies { e.incoming(&frame); } e.pump(); }
+                    Some(io) => { if let Err(error) = io.write_frame(&bytes) { e.fail(format!("通信帧发送失败：{error}"), "unresponsive"); } }
+                    None => e.fail("通信链路尚未打开，无法发送；未确认全体失能", "unresponsive"),
+                },
+            }
+        }
+    }
+    fn read(&mut self, e: &mut Engine) {
+        let Some(io) = self.io.as_mut() else { return; };
+        let eof_closes = io.eof_closes(); let mut bytes = [0u8; 512];
+        let Some(result) = io.read_available(&mut bytes) else { return; };
+        match result {
+            Ok(0) if eof_closes => e.fail("通信链路已被对端关闭；未确认全体失能", "unresponsive"),
+            Ok(n) if n > 0 => e.incoming(&bytes[..n]),
+            Ok(_) => {},
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {},
+            Err(error) if !eof_closes && error.kind() == std::io::ErrorKind::TimedOut => {},
+            Err(error) => e.fail(format!("通信链路读取失败：{error}"), "unresponsive"),
+        }
+        if !e.status.port_open { self.io = None; }
+    }
 }
 fn unix_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64 }
 fn actor(rx: mpsc::Receiver<Message>, events: mpsc::Sender<Event>, shared: Arc<Mutex<Shared>>) {
-    let origin = Instant::now(); let mut e = Engine::new(); let mut io: Option<Io> = None; let mut alive = true;
-    let mut pending = None;
+    actor_with_opener(rx, events, shared, open_transport);
+}
+fn actor_with_opener<F>(rx: mpsc::Receiver<Message>, events: mpsc::Sender<Event>, shared: Arc<Mutex<Shared>>, opener: F)
+where F: Fn(String, String, &AtomicBool, u64) -> Result<Io, String> + Send + Sync + 'static {
+    let origin = Instant::now(); let mut e = Engine::new(); let mut owner = TransportOwner::default(); let mut alive = true;
+    let opener = Arc::new(opener); let mut pending = None;
     while alive {
         let cycle = Instant::now(); e.now = origin.elapsed().as_millis() as u64;
         // 每轮先接收安全意图，再处理串口应答；旧应答不能复活已取消的启动链。
@@ -466,35 +600,12 @@ fn actor(rx: mpsc::Receiver<Message>, events: mpsc::Sender<Event>, shared: Arc<M
                 }
             }
         }
+        // 安全邮箱和共享取消意图先于 worker 结果；epoch 不匹配的成功只会关闭资源。
+        owner.poll_open(&mut e);
         e.tick(origin.elapsed().as_millis() as u64);
-        // 演示回包也必须穿过相同字节校验与单在途匹配路径。
-        while let Some(effect)=e.effects.pop_front() {
-            match effect {
-                Effect::Close => { io=None; }
-                Effect::Open(mode,port,reply) => {
-                    e.phase("opening","正在打开传输端口");
-                    let opened=if mode=="demo" { Ok(Io::Demo(native_demo::Demo::new(origin.elapsed().as_millis() as u64))) } else { open_serial(port.clone()).map(Io::Serial) };
-                    e.now=origin.elapsed().as_millis() as u64;
-                    match opened { Ok(value)=>{io=Some(value);e.opened(mode,port,reply);e.pump();}, Err(error)=>{let _=reply.send(Err(error.clone()));e.fail(error,"disconnected");} }
-                }
-                Effect::Write(bytes) => {
-                    match io.as_mut() {
-                        Some(Io::Serial(port)) => { if let Err(error)=port.write_all(&bytes) { e.fail(format!("串口发送失败：{error}"),"unresponsive"); } }
-                        Some(Io::Demo(demo)) => { let replies=demo.handle(&bytes,e.now); for frame in replies {e.incoming(&frame);} e.pump(); }
-                        None => e.fail("串口尚未打开，无法发送；未确认全体失能","unresponsive"),
-                    }
-                }
-            }
-        }
-        if let Some(Io::Serial(port))=io.as_mut() {
-            let mut bytes=[0u8;512];
-            match port.read(&mut bytes) {
-                Ok(n) if n>0 => {e.now=origin.elapsed().as_millis() as u64;e.incoming(&bytes[..n]);}
-                Ok(_) => {},
-                Err(error) if matches!(error.kind(),std::io::ErrorKind::TimedOut|std::io::ErrorKind::WouldBlock|std::io::ErrorKind::Interrupted) => {},
-                Err(error) => e.fail(format!("串口读取失败：{error}"),"unresponsive"),
-            }
-        }
+        owner.effects(&mut e, &opener);
+        e.now = origin.elapsed().as_millis() as u64; owner.read(&mut e);
+        owner.effects(&mut e, &opener);
         {
             let mut s=shared.lock().unwrap_or_else(|p|p.into_inner()); s.ready=e.status.phase=="ready"; s.manual=e.manual;
             // 同步调用已发布的新 start/stop 状态优先，避免 actor 的旧快照覆盖。
@@ -504,15 +615,25 @@ fn actor(rx: mpsc::Receiver<Message>, events: mpsc::Sender<Event>, shared: Arc<M
             }
         }
         while let Some(event)=e.events.pop_front() { let _=events.send(event); }
-        if io.is_none() && e.effects.is_empty() && e.active.is_none() && e.queue.is_empty() {
-            // 断开后没有读取线程或忙轮询；仅保留阻塞的控制邮箱，下一次连接可唤醒。
-            match rx.recv() { Ok(message)=>pending=Some(message), Err(_)=>alive=false }
+        if owner.io.is_none() && e.effects.is_empty() && e.active.is_none() && e.queue.is_empty() {
+            if owner.opening.is_some() {
+                // worker 完成不会发送控制邮箱；opening 必须定时唤醒，且取消无需等连接超时。
+                match rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(message) => pending = Some(message),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {},
+                    Err(mpsc::RecvTimeoutError::Disconnected) => alive = false,
+                }
+            } else {
+                match rx.recv() { Ok(message) => pending = Some(message), Err(_) => alive = false }
+            }
         } else {
             let elapsed=cycle.elapsed(); if elapsed<Duration::from_millis(10) {thread::sleep(Duration::from_millis(10)-elapsed);}
         }
     }
-    // 队列所有者退出即释放唯一串口；不维持运动心跳。
-    e.close(); drop(io);
+    // 队列所有者退出即取消 opening 并释放唯一链路；不维持运动心跳。
+    e.close(); owner.close();
+    let mut s = shared.lock().unwrap_or_else(|p|p.into_inner()); s.ready = false; s.manual = false;
+    s.input = None; s.gamepad = e.gamepad;
 }
 async fn blocking(state: NativeState, make: impl FnOnce(Reply)->Message + Send + 'static) -> Result<Vec<Vec<u8>>,String> {
     tauri::async_runtime::spawn_blocking(move || state.call(make)).await.map_err(|e|format!("原生通信任务异常：{e}"))?
@@ -535,6 +656,52 @@ pub async fn native_command(state: State<'_,NativeState>,opcode:u8,device_id:u8,
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 只验证 actor 的真实资源所有权；本地 TCP 不是蓝牙射频/固件测试。
+    pub(super) struct TestIo {
+        socket: std::net::TcpStream, writes: Arc<Mutex<Vec<Frame>>>,
+        read_limit: usize, write_error: Option<std::io::ErrorKind>,
+    }
+    impl TestIo {
+        pub(super) fn read_available(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let n = bytes.len().min(self.read_limit); self.socket.read(&mut bytes[..n])
+        }
+        pub(super) fn write_frame(&mut self, bytes: &Frame, timeout: Duration) -> std::io::Result<()> {
+            assert_eq!(timeout, Duration::from_millis(50));
+            self.writes.lock().unwrap().push(*bytes);
+            if let Some(kind) = self.write_error { self.socket.write_all(&bytes[..13])?; return Err(std::io::Error::new(kind, "消费者部分写入后超时")); }
+            self.socket.write_all(bytes)
+        }
+    }
+    fn socket_io(read_limit: usize, write_error: Option<std::io::ErrorKind>) -> (Io, std::net::TcpStream, Arc<Mutex<Vec<Frame>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (socket, _) = listener.accept().unwrap(); socket.set_nonblocking(true).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        (Io::Test(TestIo { socket, writes: writes.clone(), read_limit, write_error }), peer, writes)
+    }
+    fn closed_bytes(peer: &mut std::net::TcpStream) -> Vec<u8> {
+        let mut bytes = Vec::new(); peer.read_to_end(&mut bytes).expect("唯一 owner 必须关闭真实 socket，不能只排队 Close"); bytes
+    }
+    fn never_open(_: String, _: String, _: &AtomicBool, _: u64) -> Result<Io, String> { panic!("本测试不应打开外部资源") }
+    fn buffered_open(e: &mut Engine, result: Result<Io, String>) -> (TransportOwner, mpsc::Receiver<Result<Vec<Vec<u8>>, String>>, Arc<AtomicBool>) {
+        let (reply, rx) = mpsc::channel(); let (tx, opened) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false)); e.opening("bluetooth", "AA:BB:CC:DD:EE:FF");
+        assert!(tx.send(result).is_ok());
+        (TransportOwner { io: None, opening: Some(PendingOpen {
+            epoch: e.epoch, mode: "bluetooth".into(), port: "AA:BB:CC:DD:EE:FF".into(), reply: Some(reply),
+            cancelled: cancelled.clone(), result: opened, started: Instant::now(),
+        }) }, rx, cancelled)
+    }
+    fn await_phase(events: &mpsc::Receiver<Event>, phase: &str) -> NativeStatus {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match events.recv_timeout(deadline.saturating_duration_since(Instant::now())).expect("actor 未发布预期状态") {
+                Event::Status(status) if status.phase == phase => return status,
+                _ => {}
+            }
+        }
+    }
     struct Harness { e: Engine, demo: native_demo::Demo, sent: Vec<(u64,Frame)> }
     impl Harness {
         fn ready() -> Self {
@@ -692,6 +859,161 @@ mod tests {
         h.e.tick(150); h.drain(); assert!(pending.try_recv().unwrap().is_err());
         assert_eq!(h.sent[start..].iter().filter(|(_, frame)| frame[6] == MOTOR_VELOCITY).count(), 1);
         assert_eq!(h.e.status.phase, "unresponsive");
+    }
+    #[test]
+    fn cancelled_buffered_open_drops_real_socket_without_old_handshake() {
+        for safety_stop in [false, true] {
+            let mut e = Engine::new(); let (io, mut peer, writes) = socket_io(512, None);
+            let (mut owner, old, cancelled) = buffered_open(&mut e, Ok(io));
+            if safety_stop { e.request_stop("连接中安全退出", None); }
+            else { let (reply, disconnected) = mpsc::channel(); e.disconnect(reply); assert!(disconnected.try_recv().unwrap().is_ok()); }
+            owner.poll_open(&mut e); owner.effects(&mut e, &Arc::new(never_open));
+            assert!(old.try_recv().unwrap().is_err()); assert!(cancelled.load(Ordering::Acquire));
+            assert!(owner.io.is_none()); assert!(owner.opening.is_none()); assert!(writes.lock().unwrap().is_empty());
+            assert!(closed_bytes(&mut peer).is_empty()); assert_eq!(e.status.phase, "disconnected");
+        }
+    }
+    #[test]
+    fn actor_cancel_open_services_mailbox_and_discards_late_success() {
+        let (io, mut peer, writes) = socket_io(512, None); let io = Mutex::new(Some(io));
+        let (entered_tx, entered_rx) = mpsc::channel(); let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx); let (cancel_tx, cancel_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel(); let (events, event_rx) = mpsc::channel(); let shared = Arc::new(Mutex::new(Shared::default()));
+        let thread = thread::spawn(move || actor_with_opener(rx, events, shared, move |_, _, cancelled, _| {
+            entered_tx.send(()).unwrap(); release_rx.lock().unwrap().recv().unwrap();
+            cancel_tx.send(cancelled.load(Ordering::Acquire)).unwrap(); Ok(io.lock().unwrap().take().unwrap())
+        }));
+        let (reply, connecting) = mpsc::channel(); assert!(tx.send(Message::Connect("bluetooth".into(), "AA:BB:CC:DD:EE:FF".into(), reply)).is_ok());
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let opening = await_phase(&event_rx, "opening"); assert_eq!(opening.mode, "bluetooth"); assert_eq!(opening.port_name, "AA:BB:CC:DD:EE:FF"); assert!(!opening.port_open);
+        let (reply, disconnected) = mpsc::channel(); assert!(tx.send(Message::Disconnect(reply)).is_ok());
+        assert!(disconnected.recv_timeout(Duration::from_secs(2)).unwrap().is_ok());
+        assert!(connecting.recv_timeout(Duration::from_secs(2)).unwrap().is_err());
+        release_tx.send(()).unwrap(); assert!(cancel_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        assert!(closed_bytes(&mut peer).is_empty()); assert!(writes.lock().unwrap().is_empty());
+        drop(tx); thread.join().unwrap();
+    }
+    #[test]
+    fn rapid_switch_does_not_wait_for_old_worker_or_sleep_through_new_open() {
+        let (io, mut peer, writes) = socket_io(512, None); let io = Mutex::new(Some(io));
+        let (entered_tx, entered_rx) = mpsc::channel(); let (release_tx, release_rx) = mpsc::channel(); let release_rx = Mutex::new(release_rx);
+        let (tx, rx) = mpsc::channel(); let (events, event_rx) = mpsc::channel(); let shared = Arc::new(Mutex::new(Shared::default()));
+        let thread = thread::spawn(move || actor_with_opener(rx, events, shared, move |mode, _, _, now| {
+            if mode == "demo" { return Ok(Io::Demo(native_demo::Demo::new(now))); }
+            entered_tx.send(()).unwrap(); release_rx.lock().unwrap().recv().unwrap(); Ok(io.lock().unwrap().take().unwrap())
+        }));
+        let (reply, old) = mpsc::channel(); assert!(tx.send(Message::Connect("bluetooth".into(), "AA:BB:CC:DD:EE:FF".into(), reply)).is_ok());
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (reply, current) = mpsc::channel(); assert!(tx.send(Message::Connect("demo".into(), String::new(), reply)).is_ok());
+        assert!(old.recv_timeout(Duration::from_secs(2)).unwrap().is_err());
+        // 不再投递 mailbox 消息：只靠 opening 的 recv_timeout 收获 worker 并握手。
+        assert!(current.recv_timeout(Duration::from_secs(2)).unwrap().is_ok()); assert_eq!(await_phase(&event_rx, "ready").mode, "demo");
+        release_tx.send(()).unwrap(); assert!(closed_bytes(&mut peer).is_empty()); assert!(writes.lock().unwrap().is_empty());
+        drop(tx); thread.join().unwrap();
+    }
+    #[test]
+    fn link_open_failure_keeps_bluetooth_endpoint_and_is_not_handshake_failure() {
+        let mut e = Engine::new(); let (mut owner, reply, _) = buffered_open(&mut e, Err("WSA 10061，设备拒绝连接".into()));
+        owner.poll_open(&mut e); owner.effects(&mut e, &Arc::new(never_open));
+        let error = reply.try_recv().unwrap().unwrap_err(); assert!(error.contains("链路建立失败")); assert!(!error.contains("固件握手失败"));
+        assert_eq!(e.status.mode, "bluetooth"); assert_eq!(e.status.port_name, "AA:BB:CC:DD:EE:FF"); assert!(!e.status.port_open);
+    }
+    #[test]
+    fn bluetooth_handshake_timeout_closes_owner_and_reports_firmware_stage() {
+        let mut e = Engine::new(); let (io, mut peer, writes) = socket_io(512, None); let (mut owner, reply, _) = buffered_open(&mut e, Ok(io));
+        owner.poll_open(&mut e); owner.effects(&mut e, &Arc::new(never_open));
+        assert_eq!(e.status.phase, "handshaking"); assert!(e.status.port_open);
+        e.tick(150); owner.effects(&mut e, &Arc::new(never_open)); e.tick(300); owner.effects(&mut e, &Arc::new(never_open));
+        assert!(reply.try_recv().unwrap().unwrap_err().contains("蓝牙链路已建立，但固件握手失败/无应答"));
+        assert!(owner.io.is_none()); assert_eq!(closed_bytes(&mut peer).len(), 128); assert_eq!(writes.lock().unwrap().len(), 2);
+        e.tick(1000); owner.effects(&mut e, &Arc::new(never_open)); assert_eq!(writes.lock().unwrap().len(), 2);
+    }
+    #[test]
+    fn bluetooth_would_block_and_fragmented_reads_use_existing_parser() {
+        let mut h = Harness::ready(); h.e.status.mode = "bluetooth".into();
+        let (io, mut peer, writes) = socket_io(3, None); let mut owner = TransportOwner { io: Some(io), opening: None };
+        owner.read(&mut h.e); assert_eq!(h.e.status.phase, "ready"); assert!(owner.io.is_some());
+        let (reply, response) = mpsc::channel(); h.e.query(0x0a, reply); h.e.pump(); let q = h.e.active.as_ref().unwrap().bytes;
+        owner.effects(&mut h.e, &Arc::new(never_open)); let b = h.demo.handle(&q, 0)[0]; peer.write_all(&b).unwrap();
+        for _ in 0..21 { owner.read(&mut h.e); assert!(matches!(response.try_recv(), Err(mpsc::TryRecvError::Empty))); }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            owner.read(&mut h.e);
+            match response.try_recv() {
+                Ok(result) => { assert_eq!(result.unwrap(), vec![b.to_vec()]); break; }
+                Err(mpsc::TryRecvError::Empty) => { assert!(Instant::now() < deadline); thread::yield_now(); }
+                Err(error) => panic!("{error}"),
+            }
+        }
+        assert_eq!(h.e.status.phase, "ready"); assert_eq!(writes.lock().unwrap().len(), 1);
+    }
+    #[test]
+    fn bluetooth_eof_revokes_old_speed_and_closes_actual_owner() {
+        let mut h = Harness::ready(); h.arm(); h.e.status.mode = "bluetooth".into(); h.input(BodyVelocity { vx: 0.8, vy: 0., wz: 0. }, 0);
+        let (io, mut peer, writes) = socket_io(512, None); let mut owner = TransportOwner { io: Some(io), opening: None };
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while owner.io.is_some() { owner.read(&mut h.e); assert!(Instant::now() < deadline); thread::yield_now(); }
+        owner.effects(&mut h.e, &Arc::new(never_open)); assert!(h.e.input.is_none()); assert_eq!(h.e.gamepad.phase, "off");
+        assert!(h.e.gamepad.message.contains("未确认全体失能")); assert!(closed_bytes(&mut peer).is_empty());
+        h.e.tick(1000); owner.effects(&mut h.e, &Arc::new(never_open)); assert!(writes.lock().unwrap().is_empty());
+        let (reply, new_session) = mpsc::channel(); h.e.opened("demo".into(), String::new(), reply); h.e.pump(); h.drain(); assert!(new_session.try_recv().unwrap().is_ok());
+        let start = h.sent.len(); h.tick(1100); assert!(h.sent[start..].iter().all(|(_, b)| !matches!(b[6], VELOCITY | ENABLE))); assert_eq!(h.e.gamepad.phase, "off");
+    }
+    #[test]
+    fn bluetooth_write_timeout_closes_owner_without_retransmitting_frame() {
+        let mut h = Harness::ready(); h.arm(); h.e.status.mode = "bluetooth".into(); h.input(BodyVelocity { vx: 0.5, vy: 0., wz: 0. }, 0);
+        let (io, mut peer, writes) = socket_io(512, Some(std::io::ErrorKind::TimedOut)); let mut owner = TransportOwner { io: Some(io), opening: None };
+        h.e.tick(0); owner.effects(&mut h.e, &Arc::new(never_open));
+        assert!(owner.io.is_none()); assert_eq!(closed_bytes(&mut peer).len(), 13); assert!(h.e.input.is_none()); assert_eq!(h.e.gamepad.phase, "off");
+        h.e.tick(150); h.e.tick(1000); owner.effects(&mut h.e, &Arc::new(never_open));
+        let writes = writes.lock().unwrap(); assert_eq!(writes.len(), 1); assert_eq!(writes[0][6], VELOCITY);
+    }
+    #[test]
+    fn switch_waits_for_nine_disable_acks_before_closing_real_owner() {
+        let mut h = Harness::ready(); h.arm(); h.e.status.mode = "bluetooth".into();
+        let (io, mut peer, writes) = socket_io(512, None); let mut owner = TransportOwner { io: Some(io), opening: None };
+        let (reply, switching) = mpsc::channel(); h.e.connect("demo".into(), String::new(), reply); h.e.pump();
+        let disable = h.e.active.as_ref().unwrap().bytes; assert_eq!(disable[6..8], [DISABLE, 255]);
+        owner.effects(&mut h.e, &Arc::new(never_open)); assert!(owner.io.is_some()); assert!(switching.try_recv().is_err());
+        let frames = h.demo.handle(&disable, 0); for b in &frames[..8] { h.e.incoming(b); }
+        owner.effects(&mut h.e, &Arc::new(never_open)); assert!(owner.io.is_some()); assert!(owner.opening.is_none());
+        h.e.incoming(&frames[8]);
+        owner.effects(&mut h.e, &Arc::new(open_transport));
+        assert!(owner.io.is_none()); assert!(owner.opening.is_some());
+        assert_eq!(closed_bytes(&mut peer).len(), 64); assert_eq!(writes.lock().unwrap().len(), 1);
+        assert_eq!(h.e.status.mode, "demo"); assert_eq!(h.e.status.phase, "opening");
+        h.e.close(); owner.close(); assert!(switching.try_recv().unwrap().is_err());
+    }
+    #[test]
+    fn superseded_switch_replies_all_complete_without_bypassing_stop_barrier() {
+        let mut h = Harness::ready(); h.arm();
+        let (reply, first) = mpsc::channel(); h.e.connect("bluetooth".into(), "AA:BB:CC:DD:EE:FF".into(), reply); h.e.pump(); h.filtered(|_, _| Vec::new());
+        let (reply, second) = mpsc::channel(); h.e.connect("tauri".into(), "COM9".into(), reply); assert!(first.try_recv().unwrap().is_err());
+        let (reply, disconnected) = mpsc::channel(); h.e.disconnect(reply); assert!(second.try_recv().unwrap().is_err());
+        let q = h.e.active.as_ref().unwrap().bytes; for b in h.demo.handle(&q, 0) { h.e.incoming(&b); }
+        h.drain(); assert!(disconnected.try_recv().unwrap().is_ok()); assert!(!h.e.status.port_open);
+    }
+    #[test]
+    fn serial_and_bluetooth_late_open_after_deadline_never_handshake() {
+        for mode in ["tauri", "bluetooth"] {
+            let mut e = Engine::new(); let (io, mut peer, writes) = socket_io(512, None);
+            let (mut owner, reply, cancelled) = buffered_open(&mut e, Ok(io));
+            let pending = owner.opening.as_mut().unwrap(); pending.mode = mode.into();
+            pending.port = if mode == "tauri" { "COM9" } else { "AA:BB:CC:DD:EE:FF" }.into();
+            pending.started = Instant::now() - open_timeout(mode); e.opening(mode, &pending.port);
+            owner.poll_open(&mut e); owner.effects(&mut e, &Arc::new(never_open));
+            assert!(reply.try_recv().unwrap().unwrap_err().contains(if mode == "tauri" { "2 秒" } else { "超时" }));
+            assert_eq!(e.status.mode, mode); assert!(cancelled.load(Ordering::Acquire));
+            assert!(writes.lock().unwrap().is_empty()); assert!(closed_bytes(&mut peer).is_empty()); assert!(owner.io.is_none());
+        }
+    }
+    #[test]
+    fn owner_exit_completes_pending_reply_and_drops_buffered_resource() {
+        let mut e = Engine::new(); let (io, mut peer, writes) = socket_io(512, None);
+        let (owner, reply, cancelled) = buffered_open(&mut e, Ok(io)); drop(owner);
+        assert!(reply.try_recv().unwrap().is_err()); assert!(cancelled.load(Ordering::Acquire));
+        assert!(closed_bytes(&mut peer).is_empty()); assert!(writes.lock().unwrap().is_empty());
     }
     impl Engine {fn responses_for_test(&self)->usize {self.events.iter().filter(|e|matches!(e,Event::Response(_))).count()}}
 }

@@ -101,16 +101,17 @@ test('失败的握手和随后迟到的 ready 事件不能让消费者显示已�
   assert.equal(h.statuses.some(status => status.phase === 'ready'), false);
 });
 
-test('断开使在途 connect 与捕获的旧事件失效，不发布迟到的 ready 或应答', async () => {
+for (const mode of ['tauri', 'bluetooth'] as const) test(`${mode} 断开使在途 connect 与捕获的旧事件失效，不发布迟到的 ready 或应答`, async () => {
   const h = harness();
-  const connecting = h.adapter.connect('tauri', 'COM_TEST');
+  const portName = mode === 'bluetooth' ? 'AA:BB:CC:DD:EE:FF' : 'COM_TEST';
+  const connecting = h.adapter.connect(mode, portName);
   const rejected = assert.rejects(connecting, /已取消/);
   await flushMessages();
   const oldStatus = h.api.subscriptions.filter(item => item.name === 'native-status').at(-1)!;
   const oldResponse = h.api.subscriptions.filter(item => item.name === 'native-response').at(-1)!;
   await h.adapter.disconnect();
   const count = h.statuses.length;
-  oldStatus.callback({ payload: ready });
+  oldStatus.callback({ payload: { ...ready, mode, portName } });
   oldResponse.callback({ payload: fixture(Opcode.State, 0x40) });
   h.api.finish('native_connect');
   await rejected;
@@ -181,4 +182,55 @@ test('新的 opening 边界前忽略旧会话全局应答和 ready，不污染�
   await connecting;
   assert.equal(h.responses.length, 1);
   assert.equal(h.statuses.at(-1)?.phase, 'ready');
+});
+
+test('蓝牙链路打开不等于固件 ready，旧串口或其他地址状态不污染当前会话', async () => {
+  const h = harness();
+  const endpoint: NativeStatus = { ...ready, mode: 'bluetooth', portName: 'AA:BB:CC:DD:EE:FF', infoFrame: fixture(Opcode.Info, BROADCAST) };
+  const connecting = h.adapter.connect('bluetooth', endpoint.portName);
+  await flushMessages();
+  h.api.emit('native-status', { ...ready, phase: 'opening' });
+  h.api.emit('native-status', ready);
+  h.api.emit('native-status', { ...endpoint, portName: '11:22:33:44:55:66', phase: 'opening' });
+  h.api.emit('native-response', fixture(Opcode.State, 0x40));
+  assert.equal(h.statuses.at(-1)?.mode, 'bluetooth');
+  assert.equal(h.statuses.at(-1)?.portName, endpoint.portName);
+  assert.equal(h.statuses.at(-1)?.phase, 'opening');
+  assert.equal(h.statuses.at(-1)?.portOpen, false);
+  assert.equal(h.responses.length, 0);
+  h.api.emit('native-status', { ...endpoint, phase: 'opening', portOpen: false, infoFrame: null });
+  h.api.emit('native-status', { ...endpoint, phase: 'handshaking', infoFrame: null });
+  assert.equal(h.statuses.at(-1)?.portOpen, true);
+  assert.equal(h.statuses.at(-1)?.phase, 'handshaking');
+  assert.equal(h.statuses.at(-1)?.info, null);
+  h.api.emit('native-status', endpoint);
+  assert.equal(h.statuses.some(status => status.phase === 'ready'), false);
+  h.api.finish('native_connect');
+  await connecting;
+  assert.equal(h.statuses.at(-1)?.mode, 'bluetooth');
+  assert.equal(h.statuses.at(-1)?.phase, 'ready');
+  assert.equal(h.statuses.at(-1)?.info?.type, 'info');
+  h.api.emit('native-status', { ...endpoint, phase: 'unresponsive', portOpen: false, infoFrame: null, lastRxAt: 0 });
+  h.api.emit('native-status', endpoint);
+  assert.equal(h.statuses.at(-1)?.phase, 'unresponsive');
+  assert.equal(h.statuses.at(-1)?.portOpen, false);
+  assert.equal(h.statuses.at(-1)?.info, null);
+  assert.equal(h.statuses.at(-1)?.lastRxAt, 0);
+});
+
+test('蓝牙握手中断链后迟到的成功 invoke 和 ready 不能恢复会话', async () => {
+  const h = harness();
+  const endpoint: NativeStatus = { ...ready, mode: 'bluetooth', portName: 'AA:BB:CC:DD:EE:FF' };
+  const connecting = h.adapter.connect('bluetooth', endpoint.portName);
+  const rejected = assert.rejects(connecting, /链路断开/);
+  await flushMessages();
+  h.api.emit('native-status', { ...endpoint, phase: 'opening', portOpen: false });
+  h.api.emit('native-status', { ...endpoint, phase: 'unresponsive', portOpen: false, message: '链路断开', lastRxAt: 0 });
+  h.api.emit('native-status', endpoint);
+  h.api.finish('native_connect');
+  await rejected;
+  h.api.emit('native-status', endpoint);
+  assert.equal(h.statuses.at(-1)?.phase, 'unresponsive');
+  assert.equal(h.statuses.at(-1)?.portOpen, false);
+  assert.equal(h.statuses.some(status => status.phase === 'ready'), false);
 });

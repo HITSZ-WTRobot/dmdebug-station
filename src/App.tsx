@@ -1,9 +1,9 @@
 import * as React from 'react';
 import { useAtom } from 'jotai';
 import { Activity, ArrowRight, Cable, Check, ChevronDown, CircleHelp, Download, Link2, LoaderCircle, Radio, RefreshCw, ShieldAlert, Square, Terminal, Unplug } from 'lucide-react';
-import { connectionAtom, devicesAtom, selectedDeviceAtom, logsAtom, type ConnectionState, type DeviceSnapshot, type LogEntry, type PlatformInfo, type SerialPortInfo, type TransportMode } from './store/atoms';
+import { connectionAtom, devicesAtom, selectedDeviceAtom, logsAtom, type ConnectionState, type DeviceSnapshot, type LogEntry, type PlatformInfo, type SerialPortInfo, type BluetoothDeviceInfo, type TransportMode } from './store/atoms';
 import { DEVICES, DEVICE_MAP, BROADCAST, Opcode, OPCODE_NAMES, WHEEL_NAMES, hexId, resultName, type Response, type WheelState } from './lib/protocol';
-import { TransportManager, getPlatformInfo, listNativeSerialPorts, isTauriEnvironment } from './lib/transport';
+import { TransportManager, getPlatformInfo, listNativeSerialPorts, listNativeBluetoothDevices, isTauriEnvironment } from './lib/transport';
 import { DeviceControls } from './components/DeviceControls';
 import { TelemetryPanel } from './components/TelemetryPanel';
 import { CommunicationRow } from './components/CommunicationRow';
@@ -41,6 +41,11 @@ export function App() {
   const [platform, setPlatform] = React.useState<PlatformInfo | null>(null);
   const [ports, setPorts] = React.useState<SerialPortInfo[]>([]);
   const [portName, setPortName] = React.useState('');
+  const [bluetoothDevices, setBluetoothDevices] = React.useState<BluetoothDeviceInfo[]>([]);
+  const [bluetoothAddress, setBluetoothAddress] = React.useState('');
+  const [bluetoothLoading, setBluetoothLoading] = React.useState(false);
+  const [bluetoothError, setBluetoothError] = React.useState('');
+  const [cancelling, setCancelling] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [notice, setNotice] = React.useState({ tone: 'info', message: '尚未发送运动命令。先连接固件，再检查设备反馈。' });
   const [wheels, setWheels] = React.useState<Record<number, { state: WheelState; time: number }>>({});
@@ -57,6 +62,22 @@ export function App() {
   connectionRef.current = connection;
   const logId = React.useRef(0);
   const disconnectCancel = React.useRef<HTMLButtonElement>(null);
+  const connectionAttempt = React.useRef(0);
+  const bluetoothRequest = React.useRef(0);
+  const refreshBluetoothDevices = React.useCallback(async () => {
+    const request = ++bluetoothRequest.current;
+    setBluetoothLoading(true); setBluetoothError('');
+    try {
+      const found = await listNativeBluetoothDevices();
+      if (request !== bluetoothRequest.current) return;
+      setBluetoothDevices(found);
+      setBluetoothAddress(previous => found.some(device => device.address === previous) ? previous : '');
+    } catch (error) {
+      if (request !== bluetoothRequest.current) return;
+      setBluetoothDevices([]); setBluetoothAddress('');
+      setBluetoothError(error instanceof Error ? error.message : String(error));
+    } finally { if (request === bluetoothRequest.current) setBluetoothLoading(false); }
+  }, []);
 
   React.useEffect(() => {
     let mounted = true;
@@ -84,8 +105,13 @@ export function App() {
       if (info.isTauri) listNativeSerialPorts().then(found => { if (mounted) { setPorts(found); setPortName(found[0]?.portName ?? ''); } }).catch(error => { if (mounted) setNotice({ tone: 'danger', message: String(error) }); });
     }).catch(error => { if (mounted) setNotice({ tone: 'danger', message: `平台检测失败：${error}` }); });
     const clock = window.setInterval(() => setNow(Date.now()), 250);
-    return () => { mounted = false; clearInterval(clock); void engine.disconnect(); engineRef.current = null; };
+    return () => { mounted = false; connectionAttempt.current++; clearInterval(clock); void engine.disconnect(); engineRef.current = null; };
   }, [setConnection, setDevices, setLogs]);
+  React.useEffect(() => {
+    if (mode !== 'bluetooth' || !platform?.isTauri || platform.os !== 'windows') return;
+    void refreshBluetoothDevices();
+    return () => { bluetoothRequest.current++; };
+  }, [mode, platform?.isTauri, platform?.os, refreshBluetoothDevices]);
 
   React.useEffect(() => {
     const engine = engineRef.current; if (!engine) return;
@@ -117,12 +143,25 @@ export function App() {
 
   const connect = async () => {
     if (!engineRef.current) return;
+    const attempt = ++connectionAttempt.current;
     setBusy(true); setWheels({});
     setCoordinateEpochs(previous => Object.fromEntries(DEVICES.map(d => [d.id, (previous[d.id] ?? 0) + 1])));
     setDevices(previous => Object.fromEntries(Object.entries(previous).map(([id, d]) => [id, { ...d, state: null, parameters: null, updatedAt: 0, parametersAt: 0 }])));
-    try { await engineRef.current.connect(mode, portName); setNotice({ tone: mode === 'demo' ? 'warning' : 'success', message: mode === 'demo' ? '正在使用协议演示数据，未连接真实电机。' : '握手成功。请逐台确认连接与故障状态；DM 需检查零点，M2006 需查询速度参数。不会自动使能。' }); }
-    catch (error) { setNotice({ tone: 'danger', message: error instanceof Error ? error.message : String(error) }); }
-    finally { setBusy(false); }
+    try {
+      await engineRef.current.connect(mode, mode === 'bluetooth' ? bluetoothAddress : portName);
+      if (attempt !== connectionAttempt.current) return;
+      setNotice({ tone: mode === 'demo' ? 'warning' : 'success', message: mode === 'demo' ? '正在使用协议演示数据，未连接真实电机。' : '握手成功。请逐台确认连接与故障状态；DM 需检查零点，M2006 需查询速度参数。不会自动使能。' });
+    } catch (error) { if (attempt === connectionAttempt.current) setNotice({ tone: 'danger', message: error instanceof Error ? error.message : String(error) }); }
+    finally { if (attempt === connectionAttempt.current) setBusy(false); }
+  };
+  const cancelConnection = async () => {
+    if (!engineRef.current || cancelling) return;
+    connectionAttempt.current++; setCancelling(true);
+    try {
+      await engineRef.current.disconnect();
+      setNotice({ tone: 'warning', message: '已取消蓝牙连接或握手；不会自动重连。取消通讯不等于电机已停止。' });
+    } catch (error) { setNotice({ tone: 'danger', message: error instanceof Error ? error.message : String(error) }); }
+    finally { setCancelling(false); setBusy(false); }
   };
   const refresh = React.useCallback(async () => {
     if (!engineRef.current || !ready || busy) return;
@@ -142,8 +181,13 @@ export function App() {
     finally { setBusy(false); }
   }, []);
   const restoreHandshake = async () => {
-    setBusy(true); try { await engineRef.current?.handshake(); setNotice({ tone: 'warning', message: '已重新握手，不自动恢复使能或旧目标。M2006 故障恢复需失能并等待 50 个新的低速反馈帧，再明确使能；DM 仍按零点与使能要求操作。' }); }
-    catch (error) { setNotice({ tone: 'danger', message: String(error) }); } finally { setBusy(false); }
+    const attempt = ++connectionAttempt.current;
+    setBusy(true);
+    try {
+      await engineRef.current?.handshake();
+      if (attempt === connectionAttempt.current) setNotice({ tone: 'warning', message: '已重新握手，不自动恢复使能或旧目标。M2006 故障恢复需失能并等待 50 个新的低速反馈帧，再明确使能；DM 仍按零点与使能要求操作。' });
+    } catch (error) { if (attempt === connectionAttempt.current) setNotice({ tone: 'danger', message: String(error) }); }
+    finally { if (attempt === connectionAttempt.current) setBusy(false); }
   };
   const exportLogs = () => {
     if (!logs.length) return;
@@ -165,22 +209,24 @@ export function App() {
     <div hidden={page !== 'serial'}>
     <section className="connection-bar" aria-label="连接与通讯状态">
       <div className="connection-settings">
-        <div className="connection-field"><label htmlFor="transport-mode">传输方式</label><select id="transport-mode" value={mode} disabled={connection.portOpen || busy} onChange={event => setMode(event.target.value as TransportMode)}>
-          {platform?.isTauri ? <option value="tauri">桌面原生串口 · Rust后端</option> : <option value="web-serial">浏览器串口</option>}<option value="demo">协议演示 · 无硬件</option>
+        <div className="connection-field"><label htmlFor="transport-mode">传输方式</label><select id="transport-mode" value={mode} disabled={connection.portOpen || busy || phaseBusy || cancelling} onChange={event => setMode(event.target.value as TransportMode)}>
+          {platform?.isTauri ? <option value="tauri">桌面原生串口 · Rust后端</option> : <option value="web-serial">浏览器串口</option>}{platform?.isTauri && platform.os === 'windows' && <option value="bluetooth">蓝牙SPP直连 · 无需COM</option>}<option value="demo">协议演示 · 无硬件</option>
         </select></div>
         {mode === 'tauri' ? <div className="connection-field port-field"><label htmlFor="serial-port">系统串口</label><div className="inline-field"><select id="serial-port" value={portName} disabled={phaseBusy || ready} onChange={event => setPortName(event.target.value)}>{!ports.length && <option value="">未检测到端口</option>}{ports.map(port => <option key={port.portName} value={port.portName}>{port.label}</option>)}</select><button className="button subtle small" title="重新枚举串口" aria-label="重新枚举串口" disabled={phaseBusy || ready} onClick={() => { void listNativeSerialPorts().then(found => { setPorts(found); if (!found.some(p => p.portName === portName)) setPortName(found[0]?.portName ?? ''); }).catch(error => setNotice({ tone: 'danger', message: String(error) })); }}><RefreshCw size={15} /></button></div></div>
+          : mode === 'bluetooth' ? <div className="connection-field port-field bluetooth-field"><label htmlFor="bluetooth-device">已配对的 SPP 设备 · 名称 / MAC</label><div className="inline-field"><select id="bluetooth-device" value={bluetoothAddress} disabled={bluetoothLoading || phaseBusy || connection.portOpen || busy || cancelling} onChange={event => setBluetoothAddress(event.target.value)}><option value="">{bluetoothLoading ? '正在读取已配对设备…' : bluetoothDevices.length ? '请选择目标设备（不会自动连接）' : '未找到已配对的 SPP 设备'}</option>{bluetoothDevices.map(device => <option key={device.address} value={device.address}>{device.name || '未命名设备'} · {device.address}{device.connected ? ' · 系统已连接（非固件就绪）' : ''}</option>)}</select><button className="button subtle small" title="刷新已配对的 SPP 设备" aria-label="刷新已配对的 SPP 设备" disabled={bluetoothLoading || phaseBusy || connection.portOpen || busy || cancelling} onClick={() => { void refreshBluetoothDevices(); }}>{bluetoothLoading ? <LoaderCircle size={15} className="busy-spin" /> : <RefreshCw size={15} />}</button></div></div>
           : <div className="port-hint"><Cable size={17} /><span>{mode === 'demo' ? '独立演示会话，不访问串口' : '连接时由浏览器选择授权端口'}</span></div>}
-        <div className="serial-format mono">115200<span>8N1 · 无流控</span></div>
-        {connection.portOpen ? <button className="button" disabled={busy} onClick={() => setDisconnectDialog(true)}><Unplug size={15} />断开</button> : <button className="button primary" disabled={busy || phaseBusy || mode === 'tauri' && !portName} onClick={() => { void connect(); }}>{phaseBusy ? <LoaderCircle size={15} className="busy-spin" /> : <Link2 size={15} />}{mode === 'demo' ? '启动演示' : '连接固件'}</button>}
+        <div className="serial-format mono">{mode === 'bluetooth' ? '模块 UART 115200' : '115200'}<span>{mode === 'bluetooth' ? '8N1 · 非无线波特率' : '8N1 · 无流控'}</span></div>
+        {connection.mode === 'bluetooth' && (phaseBusy || cancelling) ? <button className="button" disabled={cancelling} onClick={() => { void cancelConnection(); }}><LoaderCircle size={15} className="busy-spin" />{cancelling ? '正在取消…' : '取消连接 / 握手'}</button> : connection.portOpen ? <button className="button" disabled={busy || cancelling} onClick={() => setDisconnectDialog(true)}><Unplug size={15} />断开</button> : <button className="button primary" disabled={busy || phaseBusy || cancelling || mode === 'tauri' && !portName || mode === 'bluetooth' && (!bluetoothAddress || bluetoothLoading)} onClick={() => { void connect(); }}>{phaseBusy ? <LoaderCircle size={15} className="busy-spin" /> : <Link2 size={15} />}{mode === 'demo' ? '启动演示' : mode === 'bluetooth' ? '连接蓝牙并握手' : '连接固件'}</button>}
+        {mode === 'bluetooth' && <p className={`bluetooth-guidance ${bluetoothError ? 'text-danger' : ''}`} role="status">{bluetoothError ? `枚举失败：${bluetoothError}。` : !bluetoothLoading && !bluetoothDevices.length ? '没有可选设备。' : ''}请先在 Windows 配对并确认设备支持 SPP；刷新不扫描、不配对、不自动连接。PC 无需 COM；请让手机断开，避免占用 SPP。链路建立不等于固件握手成功。</p>}
       </div>
       <div className="connection-progress" aria-label="连接确认层级">
-        <div className={`connection-step ${connection.portOpen ? 'confirmed' : ''}`}><span className="step-number">1</span><span>{connection.mode === 'demo' && connection.portOpen ? '演示通道' : '端口打开'}</span></div><ArrowRight size={13} />
+        <div className={`connection-step ${connection.portOpen ? 'confirmed' : ''}`}><span className="step-number">1</span><span>{mode === 'bluetooth' ? '蓝牙链路' : connection.mode === 'demo' && connection.portOpen ? '演示通道' : '端口打开'}</span></div><ArrowRight size={13} />
         <div className={`connection-step ${ready ? 'confirmed' : ''}`}><span className="step-number">2</span><span>固件握手</span></div><ArrowRight size={13} />
         <div className={`connection-step ${ready && onlineMotorCount ? 'confirmed' : ''}`}><span className="step-number">3</span><span>{connection.mode === 'demo' && ready ? '演示反馈' : '电机反馈'} <b className="mono">{ready ? onlineMotorCount : '—'} / 12</b></span></div>
       </div>
     </section>
     <div className={`session-strip ${connection.phase === 'unresponsive' || connection.phase === 'incompatible' ? 'session-error' : ''}`} role="status">
-      <span className={`status-dot ${ready ? 'success' : phaseBusy ? 'warning' : 'unknown'}`} /><strong>{connection.mode === 'demo' && ready ? '演示会话' : PHASE_NAMES[connection.phase]}</strong><span>{connection.message}</span>
+      <span className={`status-dot ${ready ? 'success' : phaseBusy ? 'warning' : 'unknown'}`} /><strong>{connection.mode === 'demo' && ready ? '演示会话' : connection.mode === 'bluetooth' && connection.phase === 'opening' ? '正在连接蓝牙' : PHASE_NAMES[connection.phase]}</strong><span>{connection.message}</span>
       {connection.portOpen && (connection.phase === 'unresponsive' || connection.phase === 'ready') && <button className="text-button" disabled={busy} onClick={() => { void restoreHandshake(); }}>重新握手</button>}
       <div className="traffic mono"><span>TX {connection.txFrames}</span><span>RX {connection.rxFrames}</span><span className={connection.crcErrors ? 'text-danger' : ''}>CRC {connection.crcErrors}</span><span className={connection.timeouts ? 'text-warning' : ''}>超时 {connection.timeouts}</span></div>
     </div>

@@ -19,4 +19,4 @@ serde_json = "1"
 serialport = "4.7"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Media_Multimedia"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Media_Multimedia", "Win32_Devices_Bluetooth", "Win32_Networking_WinSock"] }

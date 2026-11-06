@@ -3,6 +3,7 @@ mod native;
 mod gamepad;
 mod diagnostics;
 mod input;
+mod bluetooth;
 
 use serde::Serialize;
 use serialport::SerialPortType;
@@ -53,6 +54,12 @@ fn list_serial_ports() -> Result<Vec<SerialPortInfoDto>, String> {
     }).collect())
 }
 
+#[tauri::command]
+async fn list_bluetooth_devices() -> Result<Vec<bluetooth::BluetoothDevice>, String> {
+    tauri::async_runtime::spawn_blocking(bluetooth::list_devices).await
+        .map_err(|error| format!("蓝牙设备枚举任务异常：{error}"))?
+}
+
 fn input_diagnostics_mode() -> bool {
     std::env::args().any(|argument| argument == "--input-diagnostics")
 }
@@ -95,6 +102,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             application_mode,
+            list_bluetooth_devices,
             get_platform_info,
             list_serial_ports,
             native::native_connect,

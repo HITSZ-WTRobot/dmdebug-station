@@ -3,7 +3,7 @@ import { NativeTransportAdapter } from './native-transport';
 import { BROADCAST, Opcode, OPCODE_NAMES, StreamUnpacker, bytesToHex, encodeRequest, expectedResponseIds, hexId, resultName,
   type Response, type Info, type ProtocolIssue, type BodyVelocity, type ChassisState } from './protocol';
 import { ProtocolDemo } from './demo';
-import type { ConnectionState, TransportMode, PlatformInfo, SerialPortInfo, LogLevel } from '../store/atoms';
+import type { ConnectionState, TransportMode, PlatformInfo, SerialPortInfo, BluetoothDeviceInfo, LogLevel } from '../store/atoms';
 interface SerialPort {
   open(options: { baudRate: number; dataBits: number; stopBits: number; parity: string; flowControl: string }): Promise<void>;
   close(): Promise<void>; readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array>;
@@ -17,6 +17,10 @@ export async function getPlatformInfo(): Promise<PlatformInfo> {
 }
 export async function listNativeSerialPorts(): Promise<SerialPortInfo[]> {
   return isTauriEnvironment() ? invoke<SerialPortInfo[]>('list_serial_ports') : [];
+}
+export async function listNativeBluetoothDevices(): Promise<BluetoothDeviceInfo[]> {
+  if (!isTauriEnvironment()) throw new Error('蓝牙 SPP 直连仅支持 Windows 桌面版，浏览器不支持经典蓝牙 RFCOMM');
+  return invoke<BluetoothDeviceInfo[]>('list_bluetooth_devices');
 }
 interface Transaction {
   sequence: number; opcode: number; id: number; bytes: Uint8Array; expected: Set<number>;
@@ -270,6 +274,7 @@ export class TransportManager {
   async connect(mode: TransportMode, portName = ''): Promise<void> {
     if (this.native) return this.native.connect(mode, portName);
     if (mode === 'tauri') throw new Error('浏览器版无法使用原生串口，请选择 Web Serial');
+    if (mode === 'bluetooth') throw new Error('浏览器不支持经典蓝牙 RFCOMM / SPP 直连，请使用 Windows 桌面版');
     await this.disconnect(); const generation = this.generation;
     this.publish({ mode, phase: 'opening', portOpen: false, portName: mode === 'demo' ? '协议演示 · 无硬件连接' : mode === 'web-serial' ? '浏览器串口' : portName,
       message: '正在打开传输端口', info: null, lastRxAt: 0, txFrames: 0, rxFrames: 0, crcErrors: 0, timeouts: 0 });

@@ -15,7 +15,7 @@ export interface NativePadSnapshot {
   inputTarget: BodyVelocity; target: BodyVelocity; phase: string; message: string;
 }
 export interface NativeStatus extends Omit<ConnectionState, 'info' | 'mode'> {
-  infoFrame: number[] | null; mode: 'tauri' | 'demo';
+  infoFrame: number[] | null; mode: 'tauri' | 'bluetooth' | 'demo';
 }
 export interface NativeBridge {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
@@ -83,12 +83,16 @@ export class NativeTransportAdapter {
   }
   private publish(status: ConnectionState) { this.status = status; this.callbacks.onStatus({ ...status }); }
   private receiveStatus(native: NativeStatus) {
+    if (native.mode !== this.status.mode || native.mode !== 'demo' && native.portName !== this.status.portName) return;
     // 新会话开始前，Rust 仍可能正在结束旧事务；opening / handshaking 是 actor 的切换边界。
     if (this.waitingFor !== null) {
       if (native.phase !== this.waitingFor) return;
       this.waitingFor = null;
     }
     if (native.phase === 'ready' && !this.negotiating && !this.readyAllowed) return;
+    if (native.phase === 'disconnected' || native.phase === 'unresponsive' || native.phase === 'incompatible') {
+      this.negotiating = false; this.readyAllowed = false;
+    }
     let info: ConnectionState['info'] = null;
     if (native.infoFrame) {
       try { const response = decodeFrame(Uint8Array.from(native.infoFrame)); if (response.type === 'info') info = response; }
@@ -126,7 +130,9 @@ export class NativeTransportAdapter {
   private async negotiate(command: string, args: Record<string, unknown> | undefined, generation: number) {
     try {
       await this.operation<void>(command, args);
-      this.requireCurrent(generation); this.negotiating = false; this.readyAllowed = true;
+      this.requireCurrent(generation);
+      if (this.status.phase === 'disconnected' || this.status.phase === 'unresponsive' || this.status.phase === 'incompatible') throw new Error(this.status.message);
+      this.negotiating = false; this.readyAllowed = true;
       if (this.pendingStatus) this.publish(this.pendingStatus);
     } catch (error) {
       if (this.current(generation)) {
