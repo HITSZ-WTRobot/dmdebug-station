@@ -8,7 +8,8 @@
 
 - `v1.1.0` 的[云端构建](https://github.com/HITSZ-WTRobot/dmdebug-station/actions/runs/42216993276)中，Windows x64、Linux x64 AppImage与便携网页构建通过；macOS因两次 `generate_context!()` 重复定义 `_EMBED_INFO_PLIST` 而失败。完整Release被门禁阻止，未发布缺少macOS的附件集，失败标签未改写。
 - `v1.1.1` 改为入口只生成一次Tauri上下文，移动给工作台或独立只读诊断Builder；不改变命令注册边界。Windows本地89项Rust回归及release构建通过，并实际启动普通工作台和 `--input-diagnostics` 窗口，观察到三总线工作台与只读输入诊断分别显示。没有连接真实串口、Ozone或使能电机；未将界面观察写成IPC拒绝测试或macOS运行证明。
-- `v1.1.1` 三端最终构建与附件以对应GitHub Actions及Release结果为准；macOS包未使用Developer ID签名或公证。
+- `v1.1.1` 的[云端构建](https://github.com/HITSZ-WTRobot/dmdebug-station/actions/runs/42331624441)中三端编译和回归、Windows/Linux/网页打包均通过；macOS通用应用已生成，但归档前 `lipo` 命令参数顺序有误，完整Release再次被门禁阻止。
+- `v1.1.2` 将可执行文件参数置于 `lipo -verify_arch` 之前，仍检查x86_64与arm64齐全，未跳过架构验证。最终附件与构建结论见对应GitHub Actions及Release；macOS包未使用Developer ID签名或公证。
 
 ## 底盘旋转提速
 

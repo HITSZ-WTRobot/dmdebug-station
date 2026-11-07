@@ -91,7 +91,7 @@ jobs:
           mkdir release
           app=src-tauri/target/universal-apple-darwin/release/bundle/macos/DMDebugStation.app
           executable=$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")
-          lipo -verify_arch x86_64 arm64 "$app/Contents/MacOS/$executable"
+          lipo "$app/Contents/MacOS/$executable" -verify_arch x86_64 arm64
           ditto -c -k --sequesterRsrc --keepParent "$app" release/DMDebugStation-macos-universal.zip
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
