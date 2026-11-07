@@ -453,8 +453,7 @@ pub fn diagnostic_pause(paused: bool, state: State<'_, DiagnosticState>) -> Resu
 fn application_mode() -> &'static str { "input-diagnostics" }
 
 /// 独立 Builder 只注册诊断命令，不注册串口、Ozone 或电机命令。
-pub fn run() {
-    let mut context = tauri::generate_context!();
+pub fn run(mut context: tauri::Context<tauri::Wry>) {
     for window in &mut context.config_mut().app.windows {
         // 启动时不抢占其他应用焦点；由用户自行切到诊断窗口。
         window.focus = false;
