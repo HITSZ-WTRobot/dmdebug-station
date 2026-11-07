@@ -71,8 +71,10 @@ fn application_mode() -> &'static str {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // macOS 每个程序只能嵌入一次 Info.plist；两种入口移动同一份上下文。
+    let context = tauri::generate_context!();
     // 诊断程序不注册通信或电机控制命令，也不启动它们的后台线程。
-    if input_diagnostics_mode() { diagnostics::run(); return; }
+    if input_diagnostics_mode() { diagnostics::run(context); return; }
     tauri::Builder::default()
         .manage(native::NativeState::default())
         .manage(gamepad::NativeGamepadState::default())
@@ -124,6 +126,6 @@ pub fn run() {
             ozone::ozone_read_parameters,
             ozone::ozone_write_parameter,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running DMDebug Station Tauri application");
 }

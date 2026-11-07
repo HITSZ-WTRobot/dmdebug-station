@@ -4,6 +4,12 @@
 
 以下整合原根README和网页README的既有记录，按功能区分，**不是本次文档迁移新执行的验证**。不同阶段的测试数量不相加、不代表当前总数；历史Windows构建结果不证明macOS/Linux成功，三平台结果以对应CI/Release记录为准。演示、模型、TCP替身与编译成功都不证明无线实时性、实物转速、带载稳定或硬件安全。
 
+## 三平台发布检查
+
+- `v1.1.0` 的[云端构建](https://github.com/HITSZ-WTRobot/dmdebug-station/actions/runs/42216993276)中，Windows x64、Linux x64 AppImage与便携网页构建通过；macOS因两次 `generate_context!()` 重复定义 `_EMBED_INFO_PLIST` 而失败。完整Release被门禁阻止，未发布缺少macOS的附件集，失败标签未改写。
+- `v1.1.1` 改为入口只生成一次Tauri上下文，移动给工作台或独立只读诊断Builder；不改变命令注册边界。Windows本地89项Rust回归及release构建通过，并实际启动普通工作台和 `--input-diagnostics` 窗口，观察到三总线工作台与只读输入诊断分别显示。没有连接真实串口、Ozone或使能电机；未将界面观察写成IPC拒绝测试或macOS运行证明。
+- `v1.1.1` 三端最终构建与附件以对应GitHub Actions及Release结果为准；macOS包未使用Developer ID签名或公证。
+
 ## 底盘旋转提速
 
 - 当时63项Node、89项Rust回归通过，Debug固件、网页及Windows桌面EXE已构建。
